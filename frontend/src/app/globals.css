@@ -1,0 +1,167 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Design tokens.
+ *
+ * Exact values from the product spec. Light and dark are peers — dark is not a
+ * filtered version of light, and both were picked so severity tints stay legible
+ * against their own background.
+ */
+:root {
+  --bg: #ffffff;
+  --surface: #f7f7f8;
+  --surface-hover: #f0f0f2;
+  --border: #e4e4e8;
+  --border-strong: #d4d4da;
+  --text: #111113;
+  --muted: #8c8c99;
+  --accent: #ff6363;
+  --accent-hover: #f24f4f;
+  --accent-subtle: #fff0f0;
+
+  /* Tinted background, dark text. Reads as a label, not a warning light. */
+  --sev-critical-bg: #fde8e8;
+  --sev-critical-fg: #8f1d1d;
+  --sev-high-bg: #feeee0;
+  --sev-high-fg: #8a4116;
+  --sev-medium-bg: #fdf4dc;
+  --sev-medium-fg: #7a5a12;
+  --sev-low-bg: #e8f1fd;
+  --sev-low-fg: #1c4a80;
+  --sev-info-bg: #eeeef1;
+  --sev-info-fg: #55555f;
+
+  --ok-bg: #e6f5ec;
+  --ok-fg: #1a6136;
+  --warn-bg: #fdf4dc;
+  --warn-fg: #7a5a12;
+
+  --scrollbar: #d4d4da;
+}
+
+.dark {
+  --bg: #111113;
+  --surface: #18181b;
+  --surface-hover: #1f1f23;
+  --border: #2e2e34;
+  --border-strong: #3d3d45;
+  --text: #fafafa;
+  --muted: #52525e;
+  --accent: #ff6363;
+  --accent-hover: #ff7a7a;
+  --accent-subtle: #2a1618;
+
+  /* Dark mode inverts the relationship — a muted wash with a light readable
+     foreground. Still no neon: these sit close to the surface colour. */
+  --sev-critical-bg: #351a1c;
+  --sev-critical-fg: #f5a3a3;
+  --sev-high-bg: #341f14;
+  --sev-high-fg: #f0b48a;
+  --sev-medium-bg: #2e2616;
+  --sev-medium-fg: #e0c887;
+  --sev-low-bg: #17233a;
+  --sev-low-fg: #9dbde8;
+  --sev-info-bg: #232329;
+  --sev-info-fg: #a1a1ad;
+
+  --ok-bg: #14291d;
+  --ok-fg: #86ce9f;
+  --warn-bg: #2e2616;
+  --warn-fg: #e0c887;
+
+  --scrollbar: #3d3d45;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  /* The muted grey is a deliberate mid-tone; sub-pixel smoothing makes it look
+     washed out on dark backgrounds. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* For the in-page anchors on the landing page. Harmless in the console,
+     which has no same-page anchor links. */
+  scroll-behavior: smooth;
+}
+
+/* The landing navbar is sticky and ~57px tall, so an anchor jump would put the
+   section heading underneath it. Applied to the scroll target rather than to
+   the nav so the offset travels with the thing being scrolled to. */
+.scroll-section {
+  scroll-margin-top: 5rem;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Tabular figures everywhere numbers are compared in a column — risk scores,
+   CVSS, port counts. Without this, digits shift width and columns jitter. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+/* Focus ring: accent outline, no glow. Only shown for keyboard users. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border: 3px solid var(--bg);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+/* Terminal output. A fixed line height keeps autoscroll maths honest. */
+.terminal-line {
+  font-variant-ligatures: none;
+  line-height: 1.5rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    /* Smooth scrolling is vestibular-trigger motion, and the rules below only
+       cover animations and transitions — scroll-behavior needs saying. */
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    /* Delays too, not just durations. The landing page's terminal stages its
+       lines in with per-line animation-delay and fill-mode: backwards, so a
+       surviving delay would leave each line *invisible* until its turn — the
+       staged motion this query exists to remove, with the content hidden
+       meanwhile. Zeroing the delay is what makes it appear complete at once. */
+    animation-delay: 0.01ms !important;
+    transition-delay: 0.01ms !important;
+  }
+}

@@ -1,0 +1,31 @@
+# Keep the build context small and never ship secrets or host-built artefacts.
+#
+# Note: .dockerignore applies to the build context only. It does NOT affect the
+# bind mount the dev compose service makes over /app, so .venv and __pycache__
+# from the host are still visible there at runtime. Nothing reads them — the
+# image installs to system site-packages, and .pyc files are version-tagged so
+# host 3.13 bytecode cannot be mistaken for the container's 3.12.
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.env
+.env.*
+!.env.example
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+
+# Generated reports are runtime state, not source.
+reports/

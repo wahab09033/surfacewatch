@@ -1,0 +1,26 @@
+# Keep the build context small. node_modules is the big one — it is reinstalled
+# in the image by `npm ci`, and shipping the host's copy would both bloat the
+# context and risk mixing platform-specific binaries.
+#
+# Note: .dockerignore applies to the build context only, not to the bind mount
+# the dev compose service makes over /app. That is why the compose file also
+# mounts a named volume over /app/node_modules — see the comment there.
+
+node_modules/
+.next/
+out/
+build/
+
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
+yarn-debug.log*
+.eslintcache
+tsconfig.tsbuildinfo
+
+.git/
+.gitignore
+Dockerfile
+.dockerignore

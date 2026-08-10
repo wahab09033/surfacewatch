@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# SurfaceWatch
+#
+# There was no .gitignore in this tree, which meant .env — holding the JWT
+# signing key and the database password — was committable. That is the first
+# entry below and the reason this file exists.
+# ---------------------------------------------------------------------------
+
+# --- Secrets ----------------------------------------------------------------
+# Every level: the compose stack reads ./.env, and backend/.env exists for
+# running the API directly on the host. The negation keeps the templates, which
+# are meant to be tracked.
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# --- Python -----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Node / Next ------------------------------------------------------------
+node_modules/
+.next/
+out/
+tsconfig.tsbuildinfo
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Runtime state ----------------------------------------------------------
+# Generated PDF/CSV/JSON reports. In the compose stack these live in a named
+# volume, but a host-run backend writes them under the source tree.
+reports/
+*.log
+
+# --- Editor / OS ------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

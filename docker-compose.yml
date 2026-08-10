@@ -1,0 +1,306 @@
+# SurfaceWatch — local development stack.
+#
+#   cp .env.example .env    # then set POSTGRES_PASSWORD and JWT_SECRET
+#   docker compose up
+#
+#   API      http://localhost:8000        (docs at /docs)
+#   Frontend http://localhost:3000
+#
+# Both the API and the frontend hot-reload from bind mounts, and the Celery
+# worker is restarted on source change by watchmedo. Editing backend/ or
+# frontend/ on the host is picked up without a rebuild; changing
+# requirements.txt or package.json still needs `docker compose build`.
+
+name: surfacewatch
+
+# The API, the worker and the one-shot migration all run the same image with
+# the same configuration and differ only in their command, so the environment
+# is written once here. config.py reads every one of these; see .env.example
+# for what each does.
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+  # Service names, not localhost. Inside the compose network each container
+  # resolves its peers by service name; "localhost" would be the container
+  # itself. These are set here rather than in .env precisely so that .env can
+  # stay valid for running the backend directly on the host too.
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-surfacewatch}
+  POSTGRES_USER: ${POSTGRES_USER:-surfacewatch}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — copy .env.example to .env}
+
+  # Three logical databases on one Redis: /0 carries the scan log pub/sub the
+  # WebSocket reads, /1 is the Celery broker, /2 the result backend. Keeping
+  # them apart means `redis-cli -n 1 flushdb` on a stuck queue cannot wipe
+  # in-flight scan output.
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+  JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — copy .env.example to .env}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-14}
+  BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+
+  # The browser origin, not the container's. CORS is checked against the
+  # Origin header the browser sends, which is always http://localhost:3000.
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+
+  ALLOW_ARBITRARY_TARGETS: ${ALLOW_ARBITRARY_TARGETS:-false}
+  SCAN_MAX_CONCURRENCY: ${SCAN_MAX_CONCURRENCY:-200}
+  SCAN_CONNECT_TIMEOUT: ${SCAN_CONNECT_TIMEOUT:-2.0}
+  SCAN_RATE_LIMIT_PER_HOST: ${SCAN_RATE_LIMIT_PER_HOST:-50}
+
+  NVD_API_KEY: ${NVD_API_KEY:-}
+
+  # AI remediation. Deliberately AI_REMEDIATION_* and not ANTHROPIC_API_KEY:
+  # pydantic-settings binds case-insensitively, and ANTHROPIC_API_KEY is very
+  # often already exported in a developer shell for something unrelated — the
+  # feature would switch itself on against a key nobody meant to point here.
+  # With no key set, findings keep their standard NVD-derived remediation.
+  AI_REMEDIATION_API_KEY: ${AI_REMEDIATION_API_KEY:-}
+  AI_REMEDIATION_ENABLED: ${AI_REMEDIATION_ENABLED:-true}
+  AI_REMEDIATION_MODEL: ${AI_REMEDIATION_MODEL:-claude-sonnet-5}
+  AI_REMEDIATION_MAX_PER_SCAN: ${AI_REMEDIATION_MAX_PER_SCAN:-60}
+  AI_REMEDIATION_TIMEOUT: ${AI_REMEDIATION_TIMEOUT:-45.0}
+  AI_REMEDIATION_CACHE_TTL_SECONDS: ${AI_REMEDIATION_CACHE_TTL_SECONDS:-604800}
+
+  # Slack alerts. The webhook URL itself is per-organisation and is stored on
+  # the organisations row via the settings UI, not here — it is a credential for
+  # one customer's channel, so it must not live in a shared env file.
+  SLACK_NOTIFICATIONS_ENABLED: ${SLACK_NOTIFICATIONS_ENABLED:-true}
+  SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-critical}
+  SLACK_TIMEOUT_SECONDS: ${SLACK_TIMEOUT_SECONDS:-10.0}
+
+  REPORT_OUTPUT_DIR: /var/lib/surfacewatch/reports
+
+x-backend-build: &backend-build
+  context: ./backend
+  target: dev
+
+services:
+  # --- data stores ---------------------------------------------------------
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-surfacewatch}
+      POSTGRES_USER: ${POSTGRES_USER:-surfacewatch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — copy .env.example to .env}
+      # Without this, initdb picks the locale from the image and index
+      # collation can differ between a machine that built the volume and one
+      # that restores it.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      # Bound to 127.0.0.1, not 0.0.0.0. A bare "5432:5432" publishes the
+      # database on every interface the host has — on a laptop on a café or
+      # conference network that is the tenant database of a security product
+      # offered to the LAN, protected only by whatever POSTGRES_PASSWORD is.
+      # Docker's publish rules are inserted ahead of the host firewall, so ufw
+      # or firewalld will not save you here. Loopback still serves psql, a GUI
+      # client and the test suite; nothing in the stack uses the host port.
+      # Set POSTGRES_BIND=0.0.0.0 to override for a deliberate remote client.
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # -U and -d matter: bare pg_isready reports ready during the brief window
+      # when initdb has started the server but not yet created the role, and
+      # the API would then connect and fail.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-surfacewatch} -d ${POSTGRES_DB:-surfacewatch} -q"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # appendonly so a restart does not silently drop queued scan tasks. Scan
+    # logs on /0 are ephemeral by design and are replayed from Postgres, but
+    # losing the broker's queue would strand a scan as permanently "running".
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      # Loopback for the same reason as Postgres, and more urgently: this Redis
+      # has no password set, so anyone who can reach the port has full
+      # read/write on the Celery queues and the scan log stream — enough to
+      # enqueue tasks the workers will execute.
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # --- schema --------------------------------------------------------------
+
+  # A one-shot job, not a step inside the API's entrypoint. Two API replicas
+  # running `alembic upgrade head` concurrently race on the version table; one
+  # ordered job that both the API and the worker wait on cannot.
+  migrate:
+    build: *backend-build
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # --- application ---------------------------------------------------------
+
+  api:
+    build: *backend-build
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      # Watch only the source. Without this uvicorn also walks .venv/ and
+      # __pycache__/ under the bind mount, which on a large tree costs enough
+      # CPU to be noticeable and can miss the edit you actually made.
+      - --reload-dir
+      - /app
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+      # Shared with the worker: report_builder writes the PDF here and the
+      # API's /api/reports/{id}/download streams it back. Two separate volumes
+      # would give every download a 410 for a file that exists on the worker.
+      - reports:/var/lib/surfacewatch/reports
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # /health/ready checks Postgres and Redis and returns 503 when either is
+      # down, so this reports the API as unhealthy for a dependency outage
+      # rather than only for a crashed process. urllib because the slim image
+      # has no curl and adding one just for a probe is not worth the layer.
+      # The try/except is what turns a 503 into a clean exit 1 — urlopen raises
+      # HTTPError on it, which would otherwise dump a traceback into the log
+      # on every probe of a degraded stack.
+      test: ["CMD", "python", "-c", "import urllib.request,sys\ntry:\n    sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3).status == 200 else 1)\nexcept Exception:\n    sys.exit(1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build: *backend-build
+    # -Q is not optional. celery_app.py routes every task to a named queue
+    # (scans / enrich / reports / notify) via task_routes, and a worker started
+    # without -Q listens only on the default "celery" queue — it would come up
+    # healthy, log nothing, and consume no work at all. Reports and CVE
+    # enrichment are separate queues so a slow WeasyPrint render cannot starve
+    # a scan, and notify is separate so a Slack alert never queues behind a
+    # half-hour enrichment run.
+    #
+    # Every queue in task_routes must appear here. Add a route in celery_app.py
+    # without adding it to this list and those tasks queue up forever with no
+    # error anywhere.
+    command:
+      - watchmedo
+      - auto-restart
+      - --directory=/app
+      - --pattern=*.py
+      - --recursive
+      - --
+      - celery
+      - -A
+      - workers.celery_app:celery_app
+      - worker
+      - --loglevel=${CELERY_LOG_LEVEL:-INFO}
+      - -Q
+      - scans,enrich,reports,notify
+      - --concurrency=${CELERY_CONCURRENCY:-4}
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+      - reports:/var/lib/surfacewatch/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # `celery inspect ping` asks this worker over the broker and fails if it
+      # has deadlocked while its process is still alive — which a plain
+      # process check would call healthy.
+      #
+      # CMD-SHELL, not CMD: the default node name is celery@$HOSTNAME, and
+      # exec-form CMD has no shell to expand that — celery would be handed the
+      # literal string "celery@${HOSTNAME}" and never match. The $$ escapes
+      # compose's own substitution so the variable survives to the container.
+      test: ["CMD-SHELL", "celery -A workers.celery_app:celery_app inspect ping -d celery@$${HOSTNAME} >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    command: ["npm", "run", "dev"]
+    environment:
+      # http://localhost:8000, NOT http://api:8000. This value is compiled into
+      # the JavaScript that runs in the browser, and the browser is on the host
+      # — it has no route to the compose network. "api" would resolve only if
+      # the fetch happened server-side, which for this app it never does: every
+      # page is a Client Component.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_TELEMETRY_DISABLED: "1"
+      # Uncomment both if edits do not trigger a rebuild. Bind mounts do not
+      # forward inotify events on macOS, or on WSL2 when the repo lives under
+      # /mnt/c rather than inside the Linux filesystem. Polling is the fallback
+      # and costs a little idle CPU.
+      # WATCHPACK_POLLING: "true"
+      # CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app
+      # These two named volumes shadow the host's directories inside the
+      # container. node_modules because the host tree may hold binaries built
+      # for a different platform, and because npm ci already installed a
+      # correct copy into the image that the bind mount would otherwise hide.
+      # .next because the host's build output and the container's would
+      # otherwise overwrite each other's caches.
+      - frontend-node-modules:/app/node_modules
+      - frontend-next:/app/.next
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      # `service_started`, not `service_healthy`: the frontend is a static
+      # client that only talks to the API from the browser, so it can come up
+      # and render its skeletons while the API is still booting. Blocking here
+      # would just make the whole stack slower to become useful.
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  frontend-node-modules:
+  frontend-next:
+  # Generated PDF/CSV/JSON reports, shared by the API and the worker.
+  reports:
