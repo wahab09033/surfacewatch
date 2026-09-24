@@ -21,7 +21,9 @@ from sqlalchemy import select, text
 
 from config import settings
 from core.deps import authenticate_websocket
+from core.errors import ErrorHandlingMiddleware, internal_error_response
 from core.events import async_redis, close_async_redis, read_history, scan_channel
+from core.request_context import RequestIdMiddleware
 from core.security_headers import SecurityHeadersMiddleware
 from db.database import AsyncSessionLocal, async_engine
 from models import Scan
@@ -29,7 +31,12 @@ from routes import assets, auth, domains, findings, reports, scans, schedules
 
 logging.basicConfig(
     level=settings.log_level,
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    # request_id on every line. The record factory in core.request_context puts
+    # the attribute on every LogRecord — including lines written outside a
+    # request, where it renders as "-" — so this format string is safe
+    # unconditionally. It is the first field after the timestamp because the
+    # usual way to read these logs is `grep <id>` from a bug report.
+    format="%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("surfacewatch")
 
@@ -70,6 +77,22 @@ app = FastAPI(
     redoc_url="/redoc" if not settings.is_production else None,
 )
 
+# Middleware is added innermost-first: add_middleware prepends, so the last one
+# added is the outermost layer. Read the block bottom-up to get the order a
+# request actually passes through.
+#
+#   1. ErrorHandlingMiddleware  — innermost, wrapping the router. Catching here
+#      rather than in the FastAPI exception handler is what puts the 500 inside
+#      CORS and the security headers, so those still decorate it. See
+#      core/errors.py for the full explanation.
+#   2. CORSMiddleware           — decorates the 500 on its way back out.
+#   3. SecurityHeadersMiddleware — outside CORS, so the headers land on preflight
+#      replies and on responses CORS rejects too.
+#   4. RequestIdMiddleware      — outermost, so the id is set before anything
+#      below logs, and is attached to every response including the rejected and
+#      synthesised ones.
+app.add_middleware(ErrorHandlingMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -78,10 +101,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Added after CORS, so it runs *outside* it. add_middleware prepends, and the
-# outermost layer is the last to touch the response — which means these headers
-# land on CORS preflight replies and on responses CORS rejects too.
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
 app.include_router(auth.router)
 app.include_router(domains.router)
@@ -252,16 +273,20 @@ async def scan_log_stream(
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Log the detail, return a generic message.
+    """Backstop for exceptions raised *outside* ErrorHandlingMiddleware.
 
-    Stack traces and driver errors can disclose schema and infrastructure, so
-    they stay in the logs.
+    Everything the router can throw is already caught a layer lower, by
+    ErrorHandlingMiddleware, precisely so the response comes back out through
+    CORS and the security headers. This handler only ever sees a failure in
+    RequestIdMiddleware, SecurityHeadersMiddleware or CORSMiddleware — the three
+    layers that sit outside it — and for those the headers were never going to
+    be meaningful anyway.
+
+    It logs the detail and returns the generic message, because stack traces and
+    driver errors can disclose schema and infrastructure.
     """
     logger.exception("unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal server error"},
-    )
+    return internal_error_response()
 
 
 @app.get("/", tags=["system"], include_in_schema=False)
