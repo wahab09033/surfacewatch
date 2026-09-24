@@ -201,7 +201,8 @@ services:
     # -Q is not optional: celery_app.py routes every task to a named queue, and
     # a worker without -Q listens only on the default "celery" queue. It would
     # come up healthy, log nothing, and run no scans at all. Every queue in
-    # task_routes must appear here.
+    # task_routes must appear here — including "schedule", which carries the
+    # beat tasks and the retention sweep.
     #
     # No watchmedo in production — the code does not change under a running
     # worker, and auto-restart mid-scan would abandon in-flight tasks.
@@ -212,7 +213,7 @@ services:
       - worker
       - --loglevel=${CELERY_LOG_LEVEL:-INFO}
       - -Q
-      - scans,enrich,reports,notify
+      - scans,enrich,reports,notify,schedule
       - --concurrency=${CELERY_CONCURRENCY:-2}
       # Recycle a child after N tasks so a slow leak in a long-lived scan
       # process cannot accumulate into an OOM on a 1 GB box.
@@ -235,6 +236,42 @@ services:
       timeout: 10s
       retries: 3
       start_period: 45s
+    restart: unless-stopped
+
+  # --- beat: exactly one ------------------------------------------------
+  #
+  # Celery beat is the only producer of scheduled work: the recurring-scan
+  # dispatcher, the retention sweep and the weekly domain re-check all fire
+  # from here. It is a separate service from the worker because beat's job is
+  # to place tasks on a queue, not to run them — folding it into a worker means
+  # the schedule dies with that worker's restart, and running it in every
+  # worker means N dispatchers racing the same rows on every tick.
+  #
+  # Do not scale this service. Two beats both dispatch, and while the
+  # dispatcher's FOR UPDATE SKIP LOCKED makes that safe — each row is claimed
+  # by exactly one of them — the second one is pure duplicated work against the
+  # same table, for no benefit. `deploy.replicas` is pinned for the same reason.
+  beat:
+    build: *backend-build
+    command:
+      - celery
+      - -A
+      - workers.celery_app:celery_app
+      - beat
+      - --loglevel=${CELERY_LOG_LEVEL:-INFO}
+      # Beat's schedule lives in celery_app.beat_schedule, so the file on disk
+      # is only a cache of the last run time. Pinning it to a path inside the
+      # container keeps it off the bind-mounted volume, where it would survive a
+      # redeploy and make beat think a tick had already happened.
+      - --schedule=/tmp/celerybeat-schedule
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # --- optional: frontend on this VM instead of Vercel -----------------------

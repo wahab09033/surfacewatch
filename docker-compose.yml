@@ -205,12 +205,13 @@ services:
   worker:
     build: *backend-build
     # -Q is not optional. celery_app.py routes every task to a named queue
-    # (scans / enrich / reports / notify) via task_routes, and a worker started
-    # without -Q listens only on the default "celery" queue — it would come up
-    # healthy, log nothing, and consume no work at all. Reports and CVE
-    # enrichment are separate queues so a slow WeasyPrint render cannot starve
-    # a scan, and notify is separate so a Slack alert never queues behind a
-    # half-hour enrichment run.
+    # (scans / enrich / reports / notify / schedule) via task_routes, and a
+    # worker started without -Q listens only on the default "celery" queue — it
+    # would come up healthy, log nothing, and consume no work at all. Reports
+    # and CVE enrichment are separate queues so a slow WeasyPrint render cannot
+    # starve a scan, notify is separate so a Slack alert never queues behind a
+    # half-hour enrichment run, and schedule carries the beat tasks and the
+    # retention sweep so neither lands in front of a scan's first task.
     #
     # Every queue in task_routes must appear here. Add a route in celery_app.py
     # without adding it to this list and those tasks queue up forever with no
@@ -228,7 +229,7 @@ services:
       - worker
       - --loglevel=${CELERY_LOG_LEVEL:-INFO}
       - -Q
-      - scans,enrich,reports,notify
+      - scans,enrich,reports,notify,schedule
       - --concurrency=${CELERY_CONCURRENCY:-4}
     environment: *backend-env
     volumes:
@@ -255,6 +256,47 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
+
+  # --- beat: exactly one ------------------------------------------------
+  #
+  # Fires the recurring-scan dispatcher, the retention sweep and the weekly
+  # domain re-check. Without this service the worker still runs scans on
+  # demand, but no schedule ever fires — every schedule shows as enabled in the
+  # UI and does nothing, which is a confusing way to find out beat is missing.
+  #
+  # Do not scale it. Two beats both dispatch; FOR UPDATE SKIP LOCKED keeps that
+  # correct, but the second one is duplicated work against the same table.
+  beat:
+    build: *backend-build
+    # Same watchmedo wrapper as the worker, so editing a task during
+    # development is picked up without a restart.
+    command:
+      - watchmedo
+      - auto-restart
+      - --directory=/app
+      - --pattern=*.py
+      - --recursive
+      - --
+      - celery
+      - -A
+      - workers.celery_app:celery_app
+      - beat
+      - --loglevel=${CELERY_LOG_LEVEL:-INFO}
+      # The schedule lives in celery_app.beat_schedule. This file is only a
+      # cache of the last run time, kept off the bind-mounted volume so a
+      # redeploy does not make beat believe a tick already happened.
+      - --schedule=/tmp/celerybeat-schedule
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   frontend:

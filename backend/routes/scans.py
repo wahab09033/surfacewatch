@@ -22,9 +22,6 @@ router = APIRouter(prefix="/api/scans", tags=["scans"])
 
 logger = logging.getLogger(__name__)
 
-# Guard against a single tenant saturating the worker pool.
-MAX_CONCURRENT_SCANS_PER_ORG = 5
-
 
 def _to_out(scan: Scan) -> ScanOut:
     out = ScanOut.model_validate(scan)
@@ -70,12 +67,15 @@ async def create_scan(body: ScanCreate, current: AnalystDep, db: DbDep) -> ScanO
             Scan.status.in_([ScanStatus.QUEUED, ScanStatus.RUNNING]),
         )
     )
-    if (active or 0) >= MAX_CONCURRENT_SCANS_PER_ORG:
+    # Guard against a single tenant saturating the worker pool. The limit is a
+    # setting rather than a constant here because workers.scheduler enforces the
+    # same ceiling on scheduled scans, and two copies of one limit drift.
+    if (active or 0) >= settings.max_concurrent_scans_per_org:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
                 f"You already have {active} scans queued or running "
-                f"(limit {MAX_CONCURRENT_SCANS_PER_ORG}). Wait for one to finish."
+                f"(limit {settings.max_concurrent_scans_per_org}). Wait for one to finish."
             ),
         )
 

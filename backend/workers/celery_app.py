@@ -7,6 +7,7 @@ scaled independently. The orchestrator chains them per scan.
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import setup_logging
 
 from config import settings
@@ -25,6 +26,7 @@ celery_app = Celery(
         "workers.change_detector",
         "workers.report_builder",
         "workers.notifier",
+        "workers.scheduler",
     ],
 )
 
@@ -63,6 +65,41 @@ celery_app.conf.update(
         # enrichment run. A notification that arrives after the incident is
         # over has no value, and this queue's work is always sub-second.
         "workers.notifier.*": {"queue": "notify"},
+        # Beat's own queue. Kept separate so a dispatcher tick is never stuck
+        # behind the scans it just queued — on a shared queue the tick that
+        # creates work would wait for that work to drain, and the next tick
+        # would overlap it. The retention sweep also runs here, and its bulk
+        # DELETEs must not land in front of a scan's first task.
+        "workers.scheduler.*": {"queue": "schedule"},
+    },
+    # Everything Celery beat fires. Beat is the only producer of work with no
+    # user behind it, so this list is deliberately short and its failure modes
+    # are the ones worth reasoning about: a tick that raises produces no scan
+    # and no error anyone reads.
+    beat_schedule={
+        "dispatch-due-scans": {
+            "task": "workers.scheduler.dispatch_due_scans",
+            # Every minute. This is the resolution of every cadence, so hourly
+            # schedules fire within a minute of the hour and a scan created at
+            # 03:00:30 still starts at 04:00. A longer interval would make the
+            # other two cadences drift by however much it was.
+            "schedule": 60.0,
+        },
+        "prune-old-data": {
+            "task": "workers.scheduler.prune_old_data",
+            # 03:30 UTC — half an hour after the default daily-scan hour, so the
+            # sweep is not competing with the scans it would otherwise delete
+            # logs out from under.
+            "schedule": crontab(hour=3, minute=30),
+        },
+        "reverify-domains": {
+            "task": "workers.scheduler.reverify_domains",
+            # Monday 04:15 UTC. Weekly, and clear of both the daily dispatch and
+            # the retention sweep. Named rather than numeric: Celery's
+            # day_of_week follows cron's convention where 0 is Sunday, which is
+            # one off from the Monday-is-0 used everywhere else in this codebase.
+            "schedule": crontab(hour=4, minute=15, day_of_week="monday"),
+        },
     },
 )
 

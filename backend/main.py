@@ -25,7 +25,7 @@ from core.events import async_redis, close_async_redis, read_history, scan_chann
 from core.security_headers import SecurityHeadersMiddleware
 from db.database import AsyncSessionLocal, async_engine
 from models import Scan
-from routes import assets, auth, domains, findings, reports, scans
+from routes import assets, auth, domains, findings, reports, scans, schedules
 
 logging.basicConfig(
     level=settings.log_level,
@@ -86,6 +86,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth.router)
 app.include_router(domains.router)
 app.include_router(scans.router)
+app.include_router(schedules.router)
 app.include_router(assets.router)
 app.include_router(findings.router)
 app.include_router(reports.router)

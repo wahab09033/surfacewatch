@@ -102,6 +102,26 @@ class DomainVerificationStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class ScanCadence(str, enum.Enum):
+    """How often a scheduled scan repeats.
+
+    Three fixed cadences rather than a cron expression, on purpose. A cron
+    string means shipping a parser as a dependency and handing every tenant the
+    ability to write ``* * * * *`` — a schedule that queues a scan a minute,
+    forever, against their whole estate. The failure is silent and expensive,
+    and the concurrency cap does not stop it: the cap limits how many scans run
+    at once, not how many are created, so the queue grows without bound.
+
+    Three choices cover what recurring scanning is actually for (a daily
+    baseline, a weekly report, a tight loop on something just deployed) and
+    need no validation layer to be safe.
+    """
+
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+
+
 class ScanStatus(str, enum.Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -172,6 +192,7 @@ __all__ = [
     "JSONB",
     "LogLevel",
     "OrgScopedMixin",
+    "ScanCadence",
     "ScanStatus",
     "Severity",
     "TimestampMixin",

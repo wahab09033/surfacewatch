@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from models.finding import Finding
     from models.report import Report
     from models.scan import Scan
+    from models.scan_schedule import ScanSchedule
     from models.user import User
 
 
@@ -74,6 +75,9 @@ class Organisation(Base, TimestampMixin):
         back_populates="organisation", cascade="all, delete-orphan", passive_deletes=True
     )
     domain_verifications: Mapped[list["DomainVerification"]] = relationship(
+        back_populates="organisation", cascade="all, delete-orphan", passive_deletes=True
+    )
+    scan_schedules: Mapped[list["ScanSchedule"]] = relationship(
         back_populates="organisation", cascade="all, delete-orphan", passive_deletes=True
     )
 

@@ -10,6 +10,7 @@ from models.base import (
     DomainVerificationStatus,
     FindingStatus,
     LogLevel,
+    ScanCadence,
     ScanStatus,
     Severity,
     UserRole,
@@ -20,6 +21,7 @@ from models.organisation import Organisation
 from models.refresh_session import RefreshSession
 from models.report import Report
 from models.scan import Scan, ScanLog
+from models.scan_schedule import ScanSchedule
 from models.user import User
 
 __all__ = [
@@ -34,7 +36,9 @@ __all__ = [
     "RefreshSession",
     "Report",
     "Scan",
+    "ScanCadence",
     "ScanLog",
+    "ScanSchedule",
     "ScanStatus",
     "Severity",
     "User",

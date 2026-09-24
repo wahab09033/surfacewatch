@@ -145,6 +145,59 @@ class Settings(BaseSettings):
     # is a row anyone who registers can create.
     max_verified_domains_per_org: int = 25
 
+    # --- Scheduled scans ----------------------------------------------------
+    # Recurring scans live in scan_schedules; workers.scheduler fires them.
+    #
+    # How many dispatches in a row may fail before the schedule switches itself
+    # off. Failures here are broker failures, not scan failures — a scan that
+    # runs and finds nothing is a success. Retrying forever would mean a tenant
+    # whose schedule cannot queue wakes up to a disabled schedule with no
+    # explanation, so the reason is written to disabled_reason and shown.
+    schedule_max_consecutive_failures: int = 5
+
+    # Re-run the DNS challenge for already-verified domains, weekly.
+    #
+    # Off by default, and deliberately so: revocation is the one action here
+    # that *removes* a customer's ability to scan. A DNS provider outage, a
+    # resolver problem on our side, or a temporary nameserver change all look
+    # identical to a domain that has changed hands, and the cost of being wrong
+    # is an outage the customer did not cause and cannot immediately fix.
+    domain_reverify_enabled: bool = True
+    # How many checks in a row must fail before a domain is revoked. 0 means
+    # never revoke automatically, which is the default.
+    #
+    # Checking is always safe — it only updates last_checked_at and
+    # consecutive_failures, both of which the settings UI shows. Revoking is
+    # not: it takes away a customer's ability to scan, and every cause we can
+    # actually observe from here (a DNS provider outage, a resolver failure on
+    # our side, a nameserver move that has not propagated) is indistinguishable
+    # from a domain that genuinely changed hands. So the sweep reports, and a
+    # human decides. Raise this only where an unverified domain left scannable
+    # is the larger risk.
+    domain_reverify_failure_threshold: int = 0
+
+    # --- Retention ----------------------------------------------------------
+    # Log lines are the highest-volume, lowest-value rows in the schema: one
+    # per progress message, per scan, forever. Kept for a month because that is
+    # how far back anyone reads a scan log; a failed scan from six weeks ago is
+    # diagnosed from its findings, not its stdout.
+    retention_scan_log_days: int = 30
+
+    # Whole scans, with their findings and assets. 0 disables the sweep.
+    #
+    # Off by default and it should stay off unless you have decided otherwise:
+    # findings cascade with their scan, so enabling this deletes the security
+    # history the product exists to keep. It is here for deployments with a
+    # contractual data-retention limit, where the alternative is a manual job
+    # somebody forgets to run.
+    retention_scan_days: int = 0
+
+    # Generated PDF/HTML reports. 0 disables. Deleting a Report row is not
+    # enough — the file on disk outlives it, so the sweep unlinks first and
+    # only then deletes the row, or a failed unlink leaves an orphan with no
+    # record that it exists.
+    retention_report_days: int = 0
+
     # --- CVE enrichment ----------------------------------------------------
     nvd_api_key: str = ""
     nvd_api_base: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"
