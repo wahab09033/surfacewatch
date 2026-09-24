@@ -91,12 +91,17 @@ class RegisterRequest(BaseModel):
     @field_validator("domain")
     @classmethod
     def _normalise_domain(cls, v: str) -> str:
-        domain = v.strip().lower().strip(".")
-        if "://" in domain:
-            domain = domain.split("://", 1)[1].split("/", 1)[0]
-        if "." not in domain:
-            raise ValueError("Enter a fully-qualified domain, e.g. example.com")
-        return domain
+        # Deferred import so the rule lives in exactly one place. This used to be
+        # a local copy that only checked for a dot, which let someone register
+        # claiming an IP address or a bare public suffix like "co.uk" — and since
+        # scope matching is by suffix, a verified "co.uk" would authorise every
+        # domain under it.
+        from core.domains import InvalidDomainError, normalise_claimable_domain
+
+        try:
+            return normalise_claimable_domain(v)
+        except InvalidDomainError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class LoginRequest(BaseModel):
@@ -105,6 +110,10 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
     refresh_token: str
 
 

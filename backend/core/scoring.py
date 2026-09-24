@@ -76,29 +76,81 @@ class OutOfScopeError(ValueError):
     """Raised when a target is not covered by the org's verified domains."""
 
 
-# Ranges an internet-facing ASM scan must never touch — they belong to the
-# host's own network, not the customer's attack surface.
-_FORBIDDEN_NETWORKS = [
-    ipaddress.ip_network(n)
-    for n in (
-        "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-        "169.254.0.0/16", "0.0.0.0/8", "100.64.0.0/10", "224.0.0.0/4",
-        "::1/128", "fc00::/7", "fe80::/10",
-    )
-]
-
-
 # Hostnames that resolve to the loopback interface or to internal-only names.
 # is_private_address() only understands IP literals, so a target typed as a
 # name would otherwise sail past it — including when ALLOW_ARBITRARY_TARGETS
 # is on for a lab deployment, which skips the domain check entirely.
 _FORBIDDEN_HOSTNAMES = frozenset(
-    {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+    {
+        "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
+        # Some resolvers treat "0" as 0.0.0.0; never let it through as a name.
+        "0",
+    }
 )
 
 # Suffixes reserved for internal networks; scanning them means scanning the
 # scanner's own infrastructure, never a customer's public attack surface.
 _FORBIDDEN_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain", ".home.arpa")
+
+# Special-use ranges Python's standard classification does not flag as unsafe
+# on every supported version (is_global/is_private have tightened across
+# releases), but which an internet-facing scanner must still never touch:
+# documentation/TEST-NET ranges that only ever hold fake data, the RFC 2544
+# benchmarking block, the IETF protocol-assignment range, CGNAT space, and the
+# "this network" prefix. Kept as a *supplement* to ipaddress, not a
+# replacement — _unsafe_ip below classifies with the standard properties first
+# so new special-use assignments are handled even before this list is updated.
+_EXTRA_UNSAFE_NETWORKS = {
+    4: [
+        ipaddress.ip_network(n)
+        for n in (
+            "0.0.0.0/8",        # "this network" (RFC 791)
+            "100.64.0.0/10",    # shared/CGNAT (RFC 6598)
+            "192.0.0.0/24",     # IETF protocol assignments (RFC 6890)
+            "192.0.2.0/24",     # TEST-NET-1 (RFC 5737)
+            "198.18.0.0/15",    # benchmarking (RFC 2544)
+            "198.51.100.0/24",  # TEST-NET-2 (RFC 5737)
+            "203.0.113.0/24",   # TEST-NET-3 (RFC 5737)
+        )
+    ],
+    6: [
+        ipaddress.ip_network(n)
+        for n in (
+            "2001:db8::/32",  # documentation (RFC 3849)
+            "2001:10::/28",   # ORCHID (RFC 7343)
+            "2002::/16",      # 6to4 relay anycast space (RFC 3068)
+            "5f00::/16",      # segment routing (RFC 9602)
+        )
+    ],
+}
+
+
+def _unsafe_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True when ``addr`` must never be contacted by the scanner.
+
+    Classification leans on ipaddress' standard properties (is_loopback,
+    is_private, is_link_local, is_global, ...) rather than a hand-maintained
+    network list, which is how IPv4-mapped IPv6 stays covered: on modern
+    Pythons ``::ffff:127.0.0.1`` reports its mapped-IPv4 classification. The
+    mapped form is normalised to the IPv4 address first anyway, so the check
+    is identical across Python versions and to the plain-IPv4 path — a
+    membership test against an IPv4 network silently returns False for an
+    IPv6Address (including mapped ones), which is exactly the bypass this
+    normalisation exists to close.
+    """
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    if (
+        addr.is_loopback
+        or addr.is_unspecified
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_private
+        or not addr.is_global
+    ):
+        return True
+    return any(addr in net for net in _EXTRA_UNSAFE_NETWORKS.get(addr.version, []))
 
 
 def is_private_address(value: str) -> bool:
@@ -112,7 +164,7 @@ def is_private_address(value: str) -> bool:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return any(addr in net for net in _FORBIDDEN_NETWORKS)
+    return _unsafe_ip(addr)
 
 
 def normalise_host(target: str) -> str:

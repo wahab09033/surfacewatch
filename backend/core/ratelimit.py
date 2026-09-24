@@ -42,6 +42,7 @@ from core import events
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DOMAIN_VERIFY_ORG",
     "RateLimit",
     "RateLimitRule",
     "account_identity",
@@ -219,6 +220,15 @@ REGISTER_IP = RateLimitRule("register:ip", settings.rate_limit_register_per_ip, 
 REFRESH_IP = RateLimitRule("refresh:ip", settings.rate_limit_refresh_per_ip, _WINDOW)
 PASSWORD_USER = RateLimitRule(
     "password:user", settings.rate_limit_login_failures_per_account, _WINDOW
+)
+
+# Keyed on the organisation id, not an IP. Every caller here is authenticated, so
+# the org is the accountable identity, and per-IP would let one org spread
+# attempts across a team's addresses. Budget is consumed per attempt because the
+# cost being limited is the outbound DNS query, which is spent whether or not the
+# record turns out to match.
+DOMAIN_VERIFY_ORG = RateLimitRule(
+    "domain_verify:org", settings.rate_limit_domain_verify_per_org, _WINDOW
 )
 
 

@@ -98,6 +98,32 @@ async def test_register_isolates_orgs(org_a, org_b):
     assert org_a["org_id"] != org_b["org_id"]
 
 
+async def test_domain_claims_do_not_leak(client, org_a, org_b):
+    """A domain claim carries a challenge token, so it is tenant-private.
+
+    Registration creates one PENDING claim per org. Neither may appear in the
+    other's listing, and a claim id from A must 404 rather than 403 for B — the
+    full add/verify/delete boundary is covered in test_domain_verification.py.
+    """
+    domains = "/api/auth/organisation/domains"
+
+    a_claims = (await client.get(domains, headers=org_a["headers"])).json()["items"]
+    b_claims = (await client.get(domains, headers=org_b["headers"])).json()["items"]
+    assert [c["domain"] for c in a_claims] == [org_a["domain"]]
+    assert [c["domain"] for c in b_claims] == [org_b["domain"]]
+
+    a_id = a_claims[0]["id"]
+    stolen = await client.post(f"{domains}/{a_id}/verify", headers=org_b["headers"])
+    absent = await client.post(f"{domains}/{uuid.uuid4()}/verify", headers=org_b["headers"])
+    assert stolen.status_code == 404
+    assert stolen.json() == absent.json()
+
+    assert (
+        await client.delete(f"{domains}/{a_id}", headers=org_b["headers"])
+    ).status_code == 404
+    assert (await client.get(domains, headers=org_a["headers"])).json()["items"]
+
+
 async def test_asset_lists_do_not_leak(client, org_a, org_b):
     a = await _seed(client, org_a)
     await _seed(client, org_b)

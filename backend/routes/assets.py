@@ -275,26 +275,34 @@ async def asset_graph(
             links.append(GraphLink(source=source, target=target))
 
     # --- domain roots ------------------------------------------------------
-    domains = org.all_domains or [org.domain]
+    # No `or [org.domain]` fallback: an org with no verified domains has no
+    # authorised roots, and rendering its unverified primary domain as a graph
+    # root would show a scope it does not actually have.
+    domains = org.all_domains
     for domain in domains:
         nodes.append(
             GraphNode(id=f"domain:{domain}", label=domain, kind="domain", risk_score=0.0)
         )
 
-    def parent_domain(hostname: str) -> str:
-        """Longest verified domain this hostname sits under.
+    def parent_domain(hostname: str) -> str | None:
+        """Longest verified domain this hostname sits under, or None.
 
         Longest wins so that a host under both "acme.test" and the more
         specific "eu.acme.test" attaches to the latter, which is what someone
         looking at the map expects to see.
+
+        None means the asset is covered by no verified domain — possible when a
+        lab ran with ALLOW_ARBITRARY_TARGETS, or when a domain was revoked after
+        the asset was discovered. The node then renders without a domain root
+        instead of crashing the whole graph.
         """
         host = hostname.lower().strip(".")
-        best = ""
+        best: str | None = None
         for domain in domains:
             d = domain.lower().strip(".")
-            if (host == d or host.endswith("." + d)) and len(d) > len(best):
+            if (host == d or host.endswith("." + d)) and (best is None or len(d) > len(best)):
                 best = d
-        return best or domains[0]
+        return best
 
     # --- subdomain + ip nodes ---------------------------------------------
     ip_children: dict[str, list[Asset]] = {}
@@ -313,7 +321,9 @@ async def asset_graph(
                 open_port_count=len(open_ports),
             )
         )
-        add_link(f"domain:{parent_domain(asset.hostname)}", node_id)
+        parent = parent_domain(asset.hostname)
+        if parent is not None:
+            add_link(f"domain:{parent}", node_id)
 
         if asset.ip:
             ip_children.setdefault(asset.ip, []).append(asset)

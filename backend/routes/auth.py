@@ -8,7 +8,7 @@ API requires a valid access token, and every query is filtered by the
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
@@ -38,9 +38,17 @@ from core.security import (
     hash_password,
     verify_password,
 )
-from models import Organisation, User, UserRole
+from models import (
+    DomainVerification,
+    Organisation,
+    RefreshSession,
+    User,
+    UserRole,
+)
+from models.refresh_session import hash_refresh_token
 from schemas.auth import (
     LoginRequest,
+    LogoutRequest,
     OrganisationOut,
     PasswordChange,
     RefreshRequest,
@@ -60,19 +68,72 @@ _INVALID_CREDENTIALS = HTTPException(
     headers={"WWW-Authenticate": "Bearer"},
 )
 
+_REFRESH_INVALID = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+)
 
-def _issue_tokens(user: User) -> TokenPair:
+
+async def _issue_tokens(user: User, db: DbDep) -> TokenPair:
+    """Mint an access/refresh pair and persist the refresh session.
+
+    Every refresh token gets a server-side row recording its hash and family.
+    The row is what makes rotation and reuse detection possible — see
+    models.refresh_session for the threat model.
+    """
     kwargs = {
         "user_id": user.id,
         "org_id": user.org_id,
         "role": user.role.value,
         "token_version": user.token_version,
     }
+    refresh_token = create_refresh_token(**kwargs)
+    db.add(
+        RefreshSession(
+            user_id=user.id,
+            org_id=user.org_id,
+            token_hash=hash_refresh_token(refresh_token),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(days=settings.refresh_token_expire_days),
+        )
+    )
+    await db.commit()
     return TokenPair(
         access_token=create_access_token(**kwargs),
-        refresh_token=create_refresh_token(**kwargs),
+        refresh_token=refresh_token,
         expires_in=settings.access_token_expire_minutes * 60,
     )
+
+
+async def _revoke_family(db: DbDep, session: RefreshSession) -> None:
+    """Revoke every active session sharing ``session``'s family.
+
+    Called when a token is replayed after rotation. By then the legitimate
+    holder has usually rotated once already, so the replay is almost always a
+    thief — and killing the whole family is what stops them using the token
+    they stole.
+    """
+    now = datetime.now(timezone.utc)
+    rows = await db.scalars(
+        select(RefreshSession).where(
+            RefreshSession.family_id == session.family_id,
+            RefreshSession.revoked_at.is_(None),
+        )
+    )
+    for row in rows:
+        row.revoked_at = now
+
+
+async def _revoke_user_sessions(db: DbDep, user_id: uuid.UUID) -> None:
+    """Revoke every refresh session for one user (password change, deactivation)."""
+    now = datetime.now(timezone.utc)
+    rows = await db.scalars(
+        select(RefreshSession).where(
+            RefreshSession.user_id == user_id,
+            RefreshSession.revoked_at.is_(None),
+        )
+    )
+    for row in rows:
+        row.revoked_at = now
 
 
 @router.post(
@@ -101,7 +162,13 @@ async def register(body: RegisterRequest, db: DbDep) -> TokenPair:
     org = Organisation(
         name=body.org_name.strip(),
         domain=body.domain,
-        verified_domains=[body.domain],
+        # Deliberately empty, where this used to be ``[body.domain]``.
+        # ``verified_domains`` is scanning authorisation, and registration is open
+        # to the public: seeding it from the signup form meant anyone could claim
+        # microsoft.com and legitimately port-scan it from this deployment. The
+        # PENDING claim created below is the path in, via a DNS record only the
+        # real owner can publish.
+        verified_domains=[],
     )
     db.add(org)
     await db.flush()
@@ -114,6 +181,21 @@ async def register(body: RegisterRequest, db: DbDep) -> TokenPair:
         password_hash=hash_password(body.password),
     )
     db.add(user)
+    # Flushed before the claim below, because ``created_by`` needs ``user.id`` and
+    # the primary-key default is applied Python-side at flush, not at construction.
+    await db.flush()
+
+    # Same transaction as the org and the owner, so a new account lands in the app
+    # with its challenge already waiting instead of having to re-enter the domain
+    # it just typed. Until this claim verifies the account can scan nothing —
+    # which is the intended posture, and what the empty state in the UI explains.
+    db.add(
+        DomainVerification(
+            org_id=org.id,
+            created_by=user.id,
+            domain=body.domain,
+        )
+    )
 
     try:
         await db.commit()
@@ -125,7 +207,7 @@ async def register(body: RegisterRequest, db: DbDep) -> TokenPair:
         ) from exc
 
     await db.refresh(user)
-    return _issue_tokens(user)
+    return await _issue_tokens(user, db)
 
 
 @router.post(
@@ -167,7 +249,7 @@ async def login(body: LoginRequest, db: DbDep) -> TokenPair:
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(user)
-    return _issue_tokens(user)
+    return await _issue_tokens(user, db)
 
 
 @router.post(
@@ -177,6 +259,13 @@ async def login(body: LoginRequest, db: DbDep) -> TokenPair:
     dependencies=[Depends(RateLimit(REFRESH_IP))],
 )
 async def refresh(body: RefreshRequest, db: DbDep) -> TokenPair:
+    """Exchange a refresh token for a fresh pair, rotating the refresh token.
+
+    Rotation is single-use with reuse detection: the presented token is revoked
+    in the same transaction that issues its replacement, so a token presented
+    twice can only mean one of the two uses was the thief. Reuse revokes the
+    whole session family. See models.refresh_session for the threat model.
+    """
     try:
         payload = decode_token(body.refresh_token, expect="refresh")
     except InvalidTokenError as exc:
@@ -184,14 +273,110 @@ async def refresh(body: RefreshRequest, db: DbDep) -> TokenPair:
             status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid refresh token: {exc}"
         ) from exc
 
+    # FOR UPDATE serialises concurrent refreshes of the same token: the second
+    # request blocks until the first commits, then sees revoked_at set and is
+    # treated as the reuse it is.
+    session = await db.scalar(
+        select(RefreshSession)
+        .where(RefreshSession.token_hash == hash_refresh_token(body.refresh_token))
+        .with_for_update()
+    )
+
     user = await db.scalar(select(User).where(User.id == payload.user_id))
     if user is None or not user.is_active or user.org_id != payload.org_id:
+        if session is not None:
+            # An account that vanished or moved org while its token is being
+            # spent is a session that must not survive either.
+            await _revoke_family(db, session)
+            await db.commit()
         raise _INVALID_CREDENTIALS
     if user.token_version != payload.token_version:
+        if session is not None:
+            await _revoke_family(db, session)
+            await db.commit()
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has been revoked"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked; please sign in again",
         )
-    return _issue_tokens(user)
+
+    # Signed by us (signature + user checks passed) but with no row. Possible
+    # when the row predates rotation, was purged by a database reset, or the
+    # token is a forgery that reused a stolen signature — none of which should
+    # be honoured silently.
+    if session is None:
+        raise _REFRESH_INVALID
+
+    now = datetime.now(timezone.utc)
+    if session.revoked_at is not None:
+        # A rotated token presented again. The legitimate holder already moved
+        # on to the replacement, so whoever is presenting this is the thief —
+        # kill the whole family so the replacement is useless to them too.
+        await _revoke_family(db, session)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token reuse detected — this session has been revoked",
+        )
+
+    if session.expires_at <= now:
+        session.revoked_at = now
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired"
+        )
+
+    session.last_used_at = now
+
+    kwargs = {
+        "user_id": user.id,
+        "org_id": user.org_id,
+        "role": user.role.value,
+        "token_version": user.token_version,
+    }
+    new_refresh = create_refresh_token(**kwargs)
+    replacement = RefreshSession(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        org_id=user.org_id,
+        token_hash=hash_refresh_token(new_refresh),
+        family_id=session.family_id,
+        expires_at=now + timedelta(days=settings.refresh_token_expire_days),
+    )
+    db.add(replacement)
+    # Flush before revoking the old row: ``session.replaced_by`` is a
+    # self-referential FK, and the UPDATE would violate it if the successor row
+    # did not exist yet.
+    await db.flush()
+    session.revoked_at = now
+    session.replaced_by = replacement.id
+    await db.commit()
+
+    return TokenPair(
+        access_token=create_access_token(**kwargs),
+        refresh_token=new_refresh,
+        expires_in=settings.access_token_expire_minutes * 60,
+    )
+
+
+@router.post("/logout", response_model=Message, summary="Sign out this device")
+async def logout(body: LogoutRequest, db: DbDep) -> Message:
+    """Revoke the presented refresh session.
+
+    Always succeeds: the client clears its stored tokens either way, and a
+    logout endpoint confirming whether a token was ever valid is information
+    nobody needs. The family's other sessions (other devices) are untouched —
+    this is "sign out this browser", not "sign out everywhere". Password
+    changes and account deactivation revoke every session.
+    """
+    session = await db.scalar(
+        select(RefreshSession).where(
+            RefreshSession.token_hash == hash_refresh_token(body.refresh_token)
+        )
+    )
+    if session is not None and session.revoked_at is None:
+        session.revoked_at = datetime.now(timezone.utc)
+        await db.commit()
+    return Message(detail="Signed out.")
 
 
 @router.get("/me", response_model=UserOut, summary="Current user")
@@ -322,8 +507,12 @@ async def change_password(body: PasswordChange, current: CurrentUserDep, db: DbD
 
     await clear_failures(PASSWORD_USER, identity)
     user.password_hash = hash_password(body.new_password)
-    # Invalidate every token issued before this change.
+    # Invalidate every token issued before this change: the JWT token_version
+    # covers outstanding access/refresh JWTs, and the refresh-session rows must
+    # be revoked too so a replayed pre-change refresh token is treated as the
+    # reuse it is rather than being honoured.
     user.token_version += 1
+    await _revoke_user_sessions(db, user.id)
     await db.commit()
     return Message(detail="Password updated. Existing sessions have been signed out.")
 
@@ -399,5 +588,6 @@ async def deactivate_user(user_id: uuid.UUID, current: AdminDep, db: DbDep) -> M
 
     user.is_active = False
     user.token_version += 1  # kill their live sessions
+    await _revoke_user_sessions(db, user.id)
     await db.commit()
     return Message(detail=f"{user.email} has been deactivated")

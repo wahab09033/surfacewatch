@@ -28,7 +28,7 @@ from core.security import (
     hash_password,
     verify_password,
 )
-from models import Finding, Severity, UserRole
+from models import Finding, Organisation, Severity, UserRole
 
 
 # --- scope guard ------------------------------------------------------------
@@ -113,10 +113,48 @@ def test_no_verified_domains_means_nothing_is_in_scope():
         assert_in_scope("example.com", [])
 
 
-def test_is_private_address_allows_public_ips():
+def test_all_domains_excludes_the_unverified_primary_domain():
+    """``Organisation.domain`` is an identity, not a permission.
+
+    It used to be included in ``all_domains`` unconditionally, which meant the
+    domain typed into the open registration form was authorised for scanning
+    before anyone proved they owned it. Verification is now the only way in.
+    """
+    org = Organisation(name="Acme", domain="acme.example", verified_domains=[])
+    assert org.all_domains == []
+    with pytest.raises(OutOfScopeError):
+        assert_in_scope("acme.example", org.all_domains)
+
+
+def test_all_domains_normalises_and_dedupes():
+    """Scope matching is exact-suffix, so casing and trailing dots must not slip in."""
+    org = Organisation(
+        name="Acme",
+        domain="acme.example",
+        verified_domains=["ACME.example", "acme.example.", "", "other.example"],
+    )
+    assert org.all_domains == ["acme.example", "other.example"]
+    assert in_scope("www.acme.example", org.all_domains)
+
+
+def test_all_domains_tolerates_a_null_column():
+    """An empty scope is a valid state, and no caller may fall back to ``domain``."""
+    org = Organisation(name="Acme", domain="acme.example", verified_domains=None)
+    assert org.all_domains == []
+
+
+def test_is_private_address_allows_only_genuinely_routable_ips():
+    """Documentation ranges are refused, not treated as public.
+
+    ``203.0.113.0/24`` is TEST-NET-3 (RFC 5737) — reserved for examples, never
+    a real destination. This test used it as its example of a public address
+    until ``_EXTRA_UNSAFE_NETWORKS`` was added to cover special-use space, at
+    which point the assertion was pinning the wrong behaviour.
+    """
     assert not is_private_address("8.8.8.8")
-    assert not is_private_address("203.0.113.10")
+    assert not is_private_address("93.184.216.34")
     assert is_private_address("10.1.2.3")
+    assert is_private_address("203.0.113.10")
 
 
 # --- finding deduplication --------------------------------------------------

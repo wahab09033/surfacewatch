@@ -89,6 +89,19 @@ class AssetStatus(str, enum.Enum):
     DECOMMISSIONED = "decommissioned"
 
 
+class DomainVerificationStatus(str, enum.Enum):
+    """Lifecycle of one organisation's claim on one domain.
+
+    FAILED is not terminal: it records the last check's outcome so the UI can
+    show *why* (wrong value, no record, DNS timeout) and the user can retry the
+    same claim rather than deleting and re-adding it to get a fresh token.
+    """
+
+    PENDING = "pending"
+    VERIFIED = "verified"
+    FAILED = "failed"
+
+
 class ScanStatus(str, enum.Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -153,6 +166,7 @@ class LogLevel(str, enum.Enum):
 
 __all__ = [
     "AssetStatus",
+    "DomainVerificationStatus",
     "FindingStatus",
     "Index",
     "JSONB",

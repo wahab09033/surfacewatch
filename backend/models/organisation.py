@@ -14,6 +14,7 @@ from models.base import TimestampMixin, UUIDPk
 
 if TYPE_CHECKING:
     from models.asset import Asset
+    from models.domain_verification import DomainVerification
     from models.finding import Finding
     from models.report import Report
     from models.scan import Scan
@@ -26,10 +27,19 @@ class Organisation(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUIDPk, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Primary domain. Scan targets are validated against this (plus
-    # ``verified_domains``) so one tenant cannot point the scanner at another
-    # party's infrastructure.
+    # The organisation's stated primary domain, used for display and as the
+    # domain we pre-create a verification challenge for at registration.
+    #
+    # It grants NO scanning authority on its own. It is free text from the
+    # registration form, and registration is open to the public, so trusting it
+    # would let anyone sign up claiming a domain they do not own and scan it.
+    # ``all_domains`` reads ``verified_domains`` only.
     domain: Mapped[str] = mapped_column(String(253), nullable=False, index=True)
+
+    # Domains this org has proven control of, via a DNS TXT challenge. This is
+    # the authorisation list every scope check reads, and the only way in is
+    # models.DomainVerification reaching VERIFIED — see that model's docstring
+    # for why the two are kept in sync inside one transaction.
     verified_domains: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
@@ -63,13 +73,26 @@ class Organisation(Base, TimestampMixin):
     reports: Mapped[list["Report"]] = relationship(
         back_populates="organisation", cascade="all, delete-orphan", passive_deletes=True
     )
+    domain_verifications: Mapped[list["DomainVerification"]] = relationship(
+        back_populates="organisation", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     @property
     def all_domains(self) -> list[str]:
-        """Primary domain plus any additional verified domains, de-duplicated."""
-        domains = [self.domain, *(self.verified_domains or [])]
+        """Every domain this organisation is authorised to scan, de-duplicated.
+
+        Only verified domains. ``self.domain`` is deliberately NOT included: it
+        comes straight from the registration form, and with public registration
+        including it would mean anyone could sign up claiming ``microsoft.com``
+        and legitimately port-scan it. Proof of ownership is the only way a
+        domain reaches ``verified_domains``.
+
+        An empty list is a valid state — a freshly registered org that has not
+        completed its DNS challenge can scan nothing, and every caller must cope
+        with that rather than falling back to ``self.domain``.
+        """
         seen: dict[str, None] = {}
-        for d in domains:
+        for d in self.verified_domains or []:
             if d:
                 seen.setdefault(d.lower().strip("."), None)
         return list(seen)

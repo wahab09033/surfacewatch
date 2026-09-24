@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     rate_limit_login_failures_per_account: int = 10
     rate_limit_register_per_ip: int = 5
     rate_limit_refresh_per_ip: int = 60
+    # Each verification attempt triggers outbound DNS queries against a
+    # user-supplied domain, so an unthrottled endpoint is a DNS amplification
+    # vector pointed at third parties from our address. Keyed per organisation
+    # rather than per IP: the caller is authenticated, so the org is the
+    # accountable identity, and per-IP would let one org spread attempts across
+    # a team's addresses.
+    rate_limit_domain_verify_per_org: int = 20
     # Number of reverse proxies in front of the app whose X-Forwarded-For
     # entries can be trusted. 0 means the header is ignored entirely, which is
     # correct when the app is directly exposed — otherwise anyone can forge a
@@ -119,6 +126,24 @@ class Settings(BaseSettings):
     scan_connect_timeout: float = 2.0
     scan_rate_limit_per_host: int = 50
     http_user_agent: str = "SurfaceWatch/1.0 (+https://surfacewatch.local/scanner)"
+
+    # Concurrent QUEUED/RUNNING scans one organisation may hold. A ceiling
+    # rather than a queue: scans are long and hold sockets, so letting one org
+    # enqueue fifty starves every other tenant on the same workers.
+    #
+    # Lives here rather than as a constant in routes.scans because the scheduled
+    # scan dispatcher in workers.scheduler enforces the same limit, and a worker
+    # importing from a routes module would be wrong-direction coupling.
+    max_concurrent_scans_per_org: int = 5
+
+    # --- Domain verification ------------------------------------------------
+    # Scanning authority comes only from a domain proven via DNS TXT. See
+    # core.dns_verify and models.DomainVerification.
+    #
+    # The cap is a blast-radius limit on a public-registration deployment: each
+    # verified domain authorises every subdomain under it, and each pending claim
+    # is a row anyone who registers can create.
+    max_verified_domains_per_org: int = 25
 
     # --- CVE enrichment ----------------------------------------------------
     nvd_api_key: str = ""
