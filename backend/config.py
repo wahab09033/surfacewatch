@@ -57,8 +57,37 @@ class Settings(BaseSettings):
     postgres_db: str = "surfacewatch"
     postgres_user: str = "surfacewatch"
     postgres_password: str = "surfacewatch"
+
+    # API pool. Sized per process, so with API_WORKERS=2 and the defaults the
+    # fleet can hold 2 x (10 + 20) = 60 connections; Postgres' own default
+    # max_connections is 100 and the workers need some of it. Raising these
+    # without raising max_connections turns load into "too many clients
+    # already" rather than into more throughput.
     db_pool_size: int = 10
     db_max_overflow: int = 20
+    # Celery workers and Alembic. Smaller because a worker's concurrency is
+    # bound by --concurrency, not by the pool — a pool bigger than the number
+    # of tasks that can run at once only holds idle connections open.
+    db_worker_pool_size: int = 5
+    db_worker_max_overflow: int = 10
+
+    # Seconds a connection may sit idle before it is recycled. This is not
+    # redundant with pool_pre_ping: pre_ping checks a connection is alive
+    # *before* handing it out, which costs a round trip and still cannot save a
+    # connection the server kills mid-query. What it protects against is a
+    # connection that looks fine at checkout and is dropped while in use.
+    #
+    # 1800s is below the idle timeout of every managed Postgres worth naming
+    # (RDS's default is unset but its proxy sits at 350s; Neon, Supabase and
+    # most poolers close at 300–600s) and below the typical 350s idle timeout
+    # of a cloud load balancer. Direct connections to a local Postgres never hit
+    # it, and recycling costs one reconnect per connection per half hour.
+    db_pool_recycle: int = 1800
+    # How long a request waits for a free connection before failing. Without a
+    # bound, exhausting the pool turns into requests that hang until the client
+    # gives up, which looks like a dead API; with it, the request fails fast and
+    # the 500 says PoolTimeout, which names the actual problem.
+    db_pool_timeout: float = 30.0
     db_echo: bool = False
 
     # --- Redis / Celery ----------------------------------------------------

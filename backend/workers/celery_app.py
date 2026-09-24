@@ -8,9 +8,18 @@ from __future__ import annotations
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import setup_logging
+from celery.signals import setup_logging, worker_process_init
 
 from config import settings
+
+# Imported for its side effect, not its names. core.request_context installs a
+# logging record factory, and the format string below interpolates
+# %(request_id)s. Without the import every record reaching that formatter is
+# missing the attribute, logging swallows the resulting error and prints
+# "--- Logging error ---" instead of the line — the worker would run correctly
+# and appear to log nothing at all. The API is covered because main.py imports
+# it directly; the worker has no path to it otherwise.
+from core import request_context  # noqa: F401
 
 celery_app = Celery(
     "surfacewatch",
@@ -125,8 +134,25 @@ def _configure_logging(**_kwargs) -> None:
 
     logging.basicConfig(
         level=settings.log_level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s",
     )
+
+
+@worker_process_init.connect
+def _dispose_inherited_db_connections(**_kwargs) -> None:
+    """Drop the database sockets this worker inherited from its parent.
+
+    Fires in each forked child before it runs any task. Without it every child
+    shares the parent's pooled connections, and the first time two processes use
+    the same socket the Postgres protocol desynchronises. See
+    db.database.dispose_inherited_pools for why the handles are abandoned rather
+    than closed. Imported here rather than at module scope so that importing
+    this module — which Alembic and the test suite both do — does not drag the
+    engine in before the settings are ready.
+    """
+    from db.database import dispose_inherited_pools
+
+    dispose_inherited_pools()
 
 
 __all__ = ["celery_app"]
