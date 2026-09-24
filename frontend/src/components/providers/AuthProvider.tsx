@@ -20,6 +20,15 @@ interface AuthContextValue {
   organisation: Organisation | null;
   /** True until the initial session check settles. */
   loading: boolean;
+  /**
+   * Set when the session check could not complete for a reason that says nothing
+   * about whether the session is valid — an API that could not be reached, or one
+   * that answered 5xx. The stored token is deliberately kept in that case, so
+   * retrying can restore the session without making anyone sign in again.
+   */
+  sessionError: ApiError | null;
+  /** Retry the initial session check. */
+  retrySession: () => void;
   login: (email: string, password: string) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => void;
@@ -42,6 +51,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [organisation, setOrganisation] = useState<Organisation | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sessionError, setSessionError] = useState<ApiError | null>(null);
+  /** Bumped by retrySession to re-run the effect below. */
+  const [attempt, setAttempt] = useState(0);
 
   const loadSession = useCallback(async (signal?: AbortSignal) => {
     // Both are needed on nearly every screen, so fetch them together rather
@@ -60,11 +72,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return () => controller.abort();
     }
 
+    setLoading(true);
+    setSessionError(null);
+
     loadSession(controller.signal)
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        // A dead or tampered token is not an error worth showing; the guard
-        // will redirect to /login.
+
+        // Only a 401 proves the session is dead, and only that is worth
+        // destroying. Everything else here is a statement about the network or
+        // the server, not about the token:
+        //
+        //   * status 0 — the request never reached the API, so the token has not
+        //     been checked at all. Clearing it turns a backend restart or a
+        //     dropped wifi connection into a forced re-login, and the user has
+        //     no way to tell those apart from being signed out.
+        //   * 5xx — the API is up but broken. The token is probably fine.
+        //
+        // The token is therefore kept for both, and the guard offers a retry
+        // instead of a redirect. A 401 has already been through the api client,
+        // which cleared the tokens and fired the session-expired handler, so
+        // this branch is belt-and-braces.
+        const keepSession = !(error instanceof ApiError) || !error.isAuth;
+        if (keepSession) {
+          setSessionError(
+            error instanceof ApiError
+              ? error
+              : new ApiError(0, "Could not reach the API. Is the backend running?"),
+          );
+          setUser(null);
+          setOrganisation(null);
+          return;
+        }
+
         tokens.clear();
         setUser(null);
         setOrganisation(null);
@@ -74,7 +114,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
 
     return () => controller.abort();
-  }, [loadSession]);
+  }, [loadSession, attempt]);
+
+  const retrySession = useCallback(() => setAttempt((previous) => previous + 1), []);
 
   // Kept in a ref so the api module's expiry handler always calls the current
   // router instance without re-registering on every render.
@@ -94,6 +136,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string) => {
+      setSessionError(null);
       tokens.set(await api.auth.login(email, password));
       await loadSession();
       router.replace("/dashboard");
@@ -103,6 +146,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const register = useCallback(
     async (payload: RegisterPayload) => {
+      setSessionError(null);
       // Registration returns a token pair directly — the new owner is signed
       // in immediately rather than bounced to the login form.
       tokens.set(await api.auth.register(payload));
@@ -117,6 +161,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     tokens.clear();
     setUser(null);
     setOrganisation(null);
+    // Otherwise the guard would keep showing "could not reach the API" to
+    // somebody who has just deliberately signed out.
+    setSessionError(null);
     if (refresh) {
       // Best-effort server-side revocation: a signed-out session's token must
       // not be replayable. Failure just means the token lives until its exp.
@@ -139,8 +186,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ user, organisation, loading, login, register, logout, refreshUser, hasRole }),
-    [user, organisation, loading, login, register, logout, refreshUser, hasRole],
+    () => ({
+      user,
+      organisation,
+      loading,
+      sessionError,
+      retrySession,
+      login,
+      register,
+      logout,
+      refreshUser,
+      hasRole,
+    }),
+    [
+      user,
+      organisation,
+      loading,
+      sessionError,
+      retrySession,
+      login,
+      register,
+      logout,
+      refreshUser,
+      hasRole,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

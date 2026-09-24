@@ -13,15 +13,20 @@ import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 import { useAuth } from "../providers/AuthProvider";
+import { ErrorState } from "../ui/EmptyState";
 import { SkeletonStat, SkeletonTable } from "../ui/Skeleton";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, sessionError, retrySession } = useAuth();
   const router = useRouter();
 
+  // Not redirected when the session check failed for a reason that says nothing
+  // about the session: sending somebody to /login because their wifi dropped
+  // tells them they were signed out when they were not. The provider keeps the
+  // token in this case, so a retry can silently restore the session.
   useEffect(() => {
-    if (!loading && !user) router.replace("/login");
-  }, [loading, user, router]);
+    if (!loading && !user && !sessionError) router.replace("/login");
+  }, [loading, user, sessionError, router]);
 
   // While the session check is in flight, show the page's own shape rather than
   // a spinner — the rule is skeletons everywhere, and this is the first thing
@@ -36,6 +41,20 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         </div>
         <div className="mt-4 rounded-lg border border-border bg-bg">
           <SkeletonTable rows={6} columns={5} />
+        </div>
+      </div>
+    );
+  }
+
+  if (!user && sessionError) {
+    return (
+      <div className="mx-auto w-full max-w-[1400px] px-4 py-6 sm:px-6">
+        <div className="rounded-lg border border-border bg-bg shadow-panel">
+          <ErrorState message={sessionError.message} onRetry={retrySession} />
+          <p className="border-t border-border px-6 py-3 text-center text-xs leading-relaxed text-muted">
+            You are still signed in — this is a problem reaching the API, not with your
+            account. Nothing was signed out.
+          </p>
         </div>
       </div>
     );
