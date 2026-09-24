@@ -845,9 +845,49 @@ async def test_the_test_button_confirms_a_working_webhook(client, monkeypatch):
 
 # --- blast radius graph ---------------------------------------------------
 
+DOMAINS = "/api/auth/organisation/domains"
 
-async def _seed_estate(client, org: dict) -> None:
+
+async def _verify_domain(client, org: dict, monkeypatch) -> None:
+    """Run the real add/verify flow for the org's signup domain.
+
+    Domain roots in the graph come from ``verified_domains`` only, and
+    registration grants none — so a graph test that expects domain nodes has to
+    prove ownership first, exactly like a real deployment must.
+    """
+    claims = (await client.get(DOMAINS, headers=org["headers"])).json()["items"]
+    claim = next(c for c in claims if c["domain"] == org["domain"])
+
+    import dns.resolver
+
+    class _Rdata:
+        def __init__(self, *chunks: bytes) -> None:
+            self.strings = list(chunks)
+
+    class _FakeResolver:
+        async def resolve(self, name: str, rdtype: str):
+            assert rdtype == "TXT"
+            if name == f"_surfacewatch-challenge.{org['domain']}":
+                return [_Rdata(claim["record_value"].encode())]
+            raise dns.resolver.NXDOMAIN
+
+    from core.dns_verify import check_domain_token
+
+    import routes.domains as route
+
+    async def _check(domain: str, token: str, _resolver=None):
+        return await check_domain_token(domain, token, _FakeResolver())
+
+    monkeypatch.setattr(route, "check_domain_token", _check)
+
+    resp = await client.post(f"{DOMAINS}/{claim['id']}/verify", headers=org["headers"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["verified"] is True, resp.text
+
+
+async def _seed_estate(client, org: dict, monkeypatch) -> None:
     """Two hosts on one shared IP plus a third on its own."""
+    await _verify_domain(client, org, monkeypatch)
     domain = org["domain"]
     for hostname, ip, ports in [
         ("www." + domain, "203.0.113.30", [{"port": 443, "state": "open", "service": "https"}]),
@@ -873,9 +913,9 @@ async def test_graph_is_reachable_and_not_shadowed_by_the_uuid_route(client):
     assert resp.status_code == 200, resp.text
 
 
-async def test_graph_connects_domain_to_subdomain_to_ip_to_port(client):
+async def test_graph_connects_domain_to_subdomain_to_ip_to_port(client, monkeypatch):
     org = await _register(client, "shape", "shape-corp.example")
-    await _seed_estate(client, org)
+    await _seed_estate(client, org, monkeypatch)
 
     resp = await client.get("/api/assets/graph", headers=org["headers"])
     body = resp.json()
@@ -914,9 +954,9 @@ async def test_graph_connects_domain_to_subdomain_to_ip_to_port(client):
             assert node["asset_id"] is None
 
 
-async def test_ports_can_be_excluded(client):
+async def test_ports_can_be_excluded(client, monkeypatch):
     org = await _register(client, "noports", "noports-corp.example")
-    await _seed_estate(client, org)
+    await _seed_estate(client, org, monkeypatch)
 
     resp = await client.get(
         "/api/assets/graph", params={"include_ports": "false"}, headers=org["headers"]
@@ -943,10 +983,10 @@ async def test_graph_truncation_is_declared_not_silent(client):
     assert len([n for n in body["nodes"] if n["kind"] == "subdomain"]) == 2
 
 
-async def test_graph_does_not_leak_another_tenant(client):
+async def test_graph_does_not_leak_another_tenant(client, monkeypatch):
     a = await _register(client, "ga", "ga-corp.example")
     b = await _register(client, "gb", "gb-corp.example")
-    await _seed_estate(client, a)
+    await _seed_estate(client, a, monkeypatch)
 
     body = (await client.get("/api/assets/graph", headers=b["headers"])).json()
     rendered = json.dumps(body)

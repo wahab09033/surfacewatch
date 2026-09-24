@@ -35,7 +35,13 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config import settings
-from core.scoring import in_scope, is_private_address, normalise_host
+from core.scoring import (
+    UnsafeAddressError,
+    in_scope,
+    is_private_address,
+    normalise_host,
+    resolve_public_addresses,
+)
 from db.database import session_scope
 from models import Asset, AssetStatus, Finding, Severity
 from workers.context import ScanContext, run_async
@@ -137,18 +143,36 @@ def _try_zone_transfer(ctx: ScanContext) -> tuple[set[str], list[str]]:
         return names, leaking
 
     for ns in nameservers:
+        # NS records are attacker-controlled zone data: a hostile zone can
+        # point them at internal addresses (169.254.169.254, 127.0.0.1, ...)
+        # and turn the transfer attempt into a connection into our own
+        # network. Resolve and pin like every other socket path, and skip
+        # nameservers that do not resolve to public addresses.
         try:
-            zone = dns.zone.from_xfr(dns.query.xfr(ns, ctx.target, timeout=10, lifetime=20))
-        except Exception:
-            ctx.debug(f"AXFR refused by {ns} (expected)")
+            ns_addresses = resolve_public_addresses(ns, port=53)
+        except UnsafeAddressError:
+            ctx.debug(f"AXFR skipped: {ns} does not resolve to a public address")
             continue
 
-        leaking.append(ns)
-        ctx.warn(f"Zone transfer succeeded against {ns} — the full DNS zone is exposed")
-        for name in zone.nodes:
-            fqdn = normalise_host(f"{name}.{ctx.target}" if str(name) != "@" else ctx.target)
-            if fqdn:
-                names.add(fqdn)
+        for ns_ip in ns_addresses:
+            try:
+                zone = dns.zone.from_xfr(
+                    dns.query.xfr(ns_ip, ctx.target, timeout=10, lifetime=20)
+                )
+            except Exception:
+                ctx.debug(f"AXFR refused by {ns} (expected)")
+                continue
+
+            leaking.append(ns)
+            ctx.warn(f"Zone transfer succeeded against {ns} — the full DNS zone is exposed")
+            for name in zone.nodes:
+                fqdn = normalise_host(
+                    f"{name}.{ctx.target}" if str(name) != "@" else ctx.target
+                )
+                if fqdn:
+                    names.add(fqdn)
+            # One successful transfer per nameserver is enough to leak the zone.
+            break
     return names, leaking
 
 

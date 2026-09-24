@@ -23,6 +23,7 @@ from celery import shared_task
 from config import settings
 from db.database import session_scope
 from models import Organisation
+from workers.safe_http import safe_client
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,10 @@ def post(url: str, payload: dict[str, Any], *, client: httpx.Client | None = Non
         return False
 
     owns = client is None
-    client = client or httpx.Client(timeout=settings.slack_timeout_seconds)
+    # safe_client pins the request to the validated public address and
+    # re-guards every redirect hop, so a stored webhook cannot be turned into
+    # a connection into our own network even if Slack ever misbehaves.
+    client = client or safe_client(timeout=settings.slack_timeout_seconds)
     try:
         response = client.post(url, json=payload)
     except httpx.HTTPError as exc:

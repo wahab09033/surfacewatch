@@ -45,11 +45,55 @@ from workers.safe_http import safe_async_client, safe_client
         "::1",
         "fd00::1",
         "100.64.0.1",  # carrier-grade NAT
+        # IPv4-mapped IPv6: an IPv4 address wearing IPv6 clothes. A membership
+        # test against an IPv4 network silently returns False for these, so
+        # they must be classified by the embedded address explicitly.
+        "::ffff:127.0.0.1",
+        "::ffff:10.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:192.168.1.1",
+        # Special-use ranges that a manual list can drift away from: the RFC
+        # 2544 benchmarking block, TEST-NET documentation space, the IETF
+        # protocol-assignment range, the "this network" prefix, broadcast.
+        "198.18.0.1",
+        "198.18.255.254",
+        "192.0.2.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "192.0.0.1",
+        "0.1.2.3",
+        "255.255.255.255",
+        "2001:db8::1",  # documentation (RFC 3849)
     ],
 )
 def test_ip_literals_in_reserved_space_are_refused(target):
     with pytest.raises(UnsafeAddressError):
         resolve_public_addresses(target)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # The regression this guards against: ``::ffff:127.0.0.1 in
+        # 127.0.0.0/8`` is False, so an IPv4-mapped address used to sail past
+        # the hand-maintained network list.
+        "::ffff:127.0.0.1",
+        "::FFFF:10.0.0.1",  # mixed case must not matter
+        "::ffff:169.254.169.254",
+        "::ffff:192.168.0.1",
+        "::ffff:100.64.0.1",
+        "198.18.0.1",
+        "192.0.2.9",
+        "localhost",
+        "localhost.",
+        "0",
+        "router.internal",
+    ],
+)
+def test_is_private_address_covers_mapped_and_special_ranges(value):
+    from core.scoring import is_private_address
+
+    assert is_private_address(value) is True
 
 
 def test_names_resolving_to_loopback_are_refused():
@@ -102,6 +146,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._redirect("http://169.254.169.254/latest/meta-data/")
         elif self.path.startswith("/redirect-to-loopback"):
             self._redirect(f"http://127.0.0.1:{self.server.server_address[1]}/secret")
+        elif self.path.startswith("/redirect-to-mapped-loopback"):
+            self._redirect(f"http://[::ffff:127.0.0.1]:{self.server.server_address[1]}/secret")
         else:
             body = b"INTERNAL-ONLY-CONTENT"
             self.send_response(200)
@@ -152,6 +198,104 @@ def test_redirect_to_metadata_endpoint_is_refused(internal_server):
         with pytest.raises(UnsafeAddressError) as exc:
             client.get(f"http://127.0.0.1:{internal_server}/redirect-to-metadata")
     assert "127.0.0.1" in str(exc.value) or "169.254.169.254" in str(exc.value)
+
+
+def test_redirect_to_ipv4_mapped_loopback_is_refused(internal_server):
+    """A redirect into ::ffff:127.0.0.1 is the same attack as 127.0.0.1."""
+    with safe_client(timeout=5.0, follow_redirects=True) as client:
+        with pytest.raises(UnsafeAddressError):
+            client.get(f"http://127.0.0.1:{internal_server}/redirect-to-mapped-loopback")
+
+
+def test_zone_transfer_skips_nameservers_resolving_into_reserved_space(monkeypatch):
+    """NS records are attacker-controlled zone data.
+
+    A hostile zone can point its NS records at internal addresses and turn the
+    AXFR attempt into a connection into the scanner's own network. The transfer
+    must be skipped, never attempted, when the nameserver is not public.
+    """
+    import uuid
+
+    from workers import subdomain_enum
+    from workers.context import ScanContext
+
+    ctx = ScanContext.load(
+        scan_id=uuid.uuid4(), org_id=uuid.uuid4(), target="evil.example", config={}
+    )
+
+    class _NsRdata:
+        target = "ns1.internal-target.example"
+
+    class _NsAnswer:
+        def __init__(self, items):
+            self.items = items
+
+        def __iter__(self):
+            return iter(self.items)
+
+    import dns.resolver as dr
+
+    monkeypatch.setattr(dr, "resolve", lambda *a, **k: _NsAnswer([_NsRdata()]))
+
+    def fake_resolve(name, port=0):
+        if name == "ns1.internal-target.example":
+            raise UnsafeAddressError("not public")
+        return ["203.0.113.53"]
+
+    monkeypatch.setattr(subdomain_enum, "resolve_public_addresses", fake_resolve)
+
+    def boom(where, domain, **kw):  # pragma: no cover — must never be reached
+        raise AssertionError(f"AXFR attempted against {where}")
+
+    monkeypatch.setattr(subdomain_enum.dns.query, "xfr", boom)
+
+    names, leaking = subdomain_enum._try_zone_transfer(ctx)
+    assert names == set()
+    assert leaking == []
+
+
+def test_zone_transfer_connects_to_the_validated_ip_not_the_name(monkeypatch):
+    """The happy path still works, but the socket goes to the checked address."""
+    import uuid
+
+    from workers import subdomain_enum
+    from workers.context import ScanContext
+
+    ctx = ScanContext.load(
+        scan_id=uuid.uuid4(), org_id=uuid.uuid4(), target="good.example", config={}
+    )
+
+    class _NsRdata:
+        target = "ns1.good.example"
+
+    class _NsAnswer:
+        def __init__(self, items):
+            self.items = items
+
+        def __iter__(self):
+            return iter(self.items)
+
+    import dns.resolver as dr
+
+    monkeypatch.setattr(dr, "resolve", lambda *a, **k: _NsAnswer([_NsRdata()]))
+    monkeypatch.setattr(
+        subdomain_enum, "resolve_public_addresses", lambda name, port=0: ["203.0.113.53"]
+    )
+
+    calls: list[str] = []
+
+    def fake_xfr(where, domain, **kw):
+        calls.append(where)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(subdomain_enum.dns.query, "xfr", fake_xfr)
+
+    names, leaking = subdomain_enum._try_zone_transfer(ctx)
+    assert names == set()
+    assert leaking == []
+    # The connection was attempted against the validated public IP, never the
+    # attacker-controlled name.
+    assert calls == ["203.0.113.53"]
 
 
 def test_async_client_refuses_loopback(internal_server):

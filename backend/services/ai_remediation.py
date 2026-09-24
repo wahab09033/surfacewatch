@@ -38,6 +38,7 @@ from typing import Any
 import httpx
 
 from config import settings
+from workers.safe_http import safe_client
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +295,10 @@ def call_claude(prompt: str, *, client: httpx.Client | None = None) -> dict[str,
     }
 
     owns_client = client is None
-    client = client or httpx.Client(timeout=settings.ai_remediation_timeout)
+    # The safe client pins to the validated public address and re-guards every
+    # redirect hop; api.anthropic.com does not redirect, but the client that
+    # reaches it must not be a raw socket layer if it ever does.
+    client = client or safe_client(timeout=settings.ai_remediation_timeout)
     try:
         response = client.post(ANTHROPIC_API_URL, headers=headers, json=body)
     except httpx.HTTPError as exc:
