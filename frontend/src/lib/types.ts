@@ -101,6 +101,27 @@ export const MODULE_META: Record<
   },
 };
 
+/** How each port profile is named in the console. */
+export const PORT_PROFILE_LABEL: Record<PortProfile, string> = {
+  "top-100": "Top 100 ports",
+  "top-1000": "Top 1000 ports",
+  web: "Web ports only",
+  full: "All 65535 ports",
+  custom: "Custom list",
+};
+
+/**
+ * The same map as `<Select>` options.
+ *
+ * Here rather than in a page because both the scan form and the schedule form
+ * offer it, and two hand-maintained copies of one vocabulary is how "All
+ * 65535 ports" becomes "Full port scan" on one screen and not the other.
+ */
+export const PROFILE_OPTIONS = PORT_PROFILES.map((profile) => ({
+  value: profile,
+  label: PORT_PROFILE_LABEL[profile],
+}));
+
 // --- envelopes -------------------------------------------------------------
 
 export interface Paginated<T> {

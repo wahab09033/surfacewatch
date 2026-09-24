@@ -25,20 +25,7 @@ import { cn, formatClock, formatDateTime, formatDuration, formatRelative, plural
 import { usePoll, useQuery } from "@/lib/hooks";
 import { useScanStream } from "@/lib/useScanStream";
 import type { LogLevel, Paginated, PortProfile, Scan, ScanModule, ScanStatus } from "@/lib/types";
-import { MODULE_META, PORT_PROFILES, SCAN_MODULES, isTerminalScanStatus } from "@/lib/types";
-
-const PORT_PROFILE_LABEL: Record<PortProfile, string> = {
-  "top-100": "Top 100 ports",
-  "top-1000": "Top 1000 ports",
-  web: "Web ports only",
-  full: "All 65535 ports",
-  custom: "Custom list",
-};
-
-const PROFILE_OPTIONS = PORT_PROFILES.map((profile) => ({
-  value: profile,
-  label: PORT_PROFILE_LABEL[profile],
-}));
+import { MODULE_META, PROFILE_OPTIONS, SCAN_MODULES, isTerminalScanStatus } from "@/lib/types";
 
 export default function ScanPage() {
   const { toast } = useToast();

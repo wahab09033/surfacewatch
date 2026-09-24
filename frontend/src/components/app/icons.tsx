@@ -69,6 +69,34 @@ export function ReportsIcon() {
   );
 }
 
+/** Scheduled scans — a clock face. Distinct from RefreshIcon, which is an action. */
+export function ScheduleIcon() {
+  return (
+    <svg {...props}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.8V8l2.2 1.6" />
+    </svg>
+  );
+}
+
+/** Pause a recurring scan without deleting it. */
+export function PauseIcon() {
+  return (
+    <svg {...props}>
+      <path d="M6.2 3.5v9M9.8 3.5v9" />
+    </svg>
+  );
+}
+
+/** Resume a paused schedule. */
+export function PlayIcon() {
+  return (
+    <svg {...props}>
+      <path d="M5 3.5l7 4.5-7 4.5v-9z" />
+    </svg>
+  );
+}
+
 export function SettingsIcon() {
   return (
     <svg {...props}>

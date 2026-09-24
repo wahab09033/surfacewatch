@@ -29,6 +29,7 @@ import {
   MoonIcon,
   ReportsIcon,
   ScanIcon,
+  ScheduleIcon,
   SettingsIcon,
   SunIcon,
 } from "./icons";
@@ -37,6 +38,7 @@ const NAV = [
   { href: "/dashboard", label: "Dashboard", Icon: DashboardIcon },
   { href: "/assets", label: "Assets", Icon: AssetsIcon },
   { href: "/scan", label: "Scan", Icon: ScanIcon },
+  { href: "/schedules", label: "Schedules", Icon: ScheduleIcon },
   { href: "/findings", label: "Findings", Icon: FindingsIcon },
   { href: "/reports", label: "Reports", Icon: ReportsIcon },
   { href: "/settings", label: "Settings", Icon: SettingsIcon },

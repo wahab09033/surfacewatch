@@ -53,6 +53,31 @@ export function formatDateTime(value: string | null | undefined): string {
   });
 }
 
+/**
+ * How long until something happens, for timestamps in the future.
+ *
+ * `formatRelative` cannot be used for these: it computes `now - then`, so every
+ * future timestamp falls into its `seconds < 0` branch and renders "Just now".
+ * A schedule due in six days reading "Just now" is worse than no label at all.
+ * The two functions are separate rather than one signed formatter because the
+ * wording is genuinely different — "3 days ago" and "in 3 days" are not the
+ * same sentence with a swapped sign.
+ */
+export function formatUntil(value: string | null | undefined): string {
+  const date = parseUtc(value);
+  if (!date) return "—";
+
+  const seconds = Math.round((date.getTime() - Date.now()) / 1000);
+  if (seconds <= 0) return "due now";
+  if (seconds < 45) return "in under a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `in ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  const days = Math.round(hours / 24);
+  return `in ${days} ${days === 1 ? "day" : "days"}`;
+}
+
 export function formatClock(value: string | null | undefined): string {
   const date = parseUtc(value);
   if (!date) return "--:--:--";
