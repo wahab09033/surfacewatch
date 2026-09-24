@@ -52,6 +52,12 @@ yarn-error.log*
 reports/
 *.log
 
+# Database dumps. scripts/backup.sh defaults BACKUP_DIR to ./backups, so unless
+# BACKUP_DIR is pointed elsewhere its output lands inside the repo. A dump holds
+# every organisation, user (including password hashes), scan and finding — that
+# is customer data, and it must never reach a commit.
+backups/
+
 # --- Editor / OS ------------------------------------------------------------
 .DS_Store
 .idea/
