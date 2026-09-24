@@ -1,0 +1,192 @@
+# Continuous integration.
+#
+# Two jobs, because a backend failure and a frontend failure need different
+# people and neither should be able to mask the other.
+#
+# The backend job is the important one, and it does one thing that is easy to
+# leave out: it runs the Alembic migrations against a real, empty database
+# before the test suite. The suite builds its schema from the ORM models
+# (conftest._schema calls Base.metadata.create_all), which means a migration
+# missing a column, dropping a constraint or forgetting to create its enum type
+# passes every test and fails on a deploy — at the one moment there is no going
+# back. See backend/tests/test_migrations.py for the rest of that argument.
+#
+# The upgrade/downgrade/upgrade sequence is deliberate: a downgrade that leaves
+# an enum type behind makes the *next* upgrade fail with "type already exists",
+# which turns a rollback into an outage. Running the full chain down and back up
+# is the only way that shows up before production does it.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a run can be started by hand against a branch without pushing to it.
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's result irrelevant.
+# Cancelling it frees the runner and keeps the checks list honest.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (lint, migrations, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        # Pinned to the same major as docker-compose.yml. Testing against a
+        # different Postgres than production runs is how a migration passes CI
+        # and fails on deploy.
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # Created here so the migration step has something to talk to. The
+          # suite's own database is created and dropped by conftest, and the
+          # scratch database by tests/test_migrations.py.
+          POSTGRES_DB: surfacewatch_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d surfacewatch_ci -q"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+      redis:
+        # Not used by the test suite, which runs against fakeredis — but the
+        # migration check and the app import both go through config, and a
+        # missing broker is one less thing to explain if this ever changes.
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      # Every one of these is read by config.py. conftest.py sets the same
+      # names with os.environ.setdefault, so what is set here wins and the
+      # suite connects to the service container rather than to localhost:55432.
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else-0123456789abcdef
+      ENVIRONMENT: development
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      LOG_LEVEL: WARNING
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the Dockerfile's python:3.12-slim-bookworm base.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # WeasyPrint links against system libraries that the slim base image
+      # carries but a bare runner does not. Without these the *install* above
+      # succeeds and the import fails at collection time, which reads as a test
+      # failure rather than a missing package.
+      - name: Install WeasyPrint's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libffi8 \
+            libjpeg-turbo8 libopenjp2-7 libcairo2
+        working-directory: .
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Migrations upgrade
+        env:
+          POSTGRES_DB: surfacewatch_ci
+        run: alembic upgrade head
+
+      - name: Migrations downgrade to base
+        env:
+          POSTGRES_DB: surfacewatch_ci
+        run: alembic downgrade base
+
+      - name: Migrations upgrade again
+        # If this fails with "type ... already exists", the downgrade above left
+        # something behind and a real rollback would have been an outage.
+        env:
+          POSTGRES_DB: surfacewatch_ci
+        run: alembic upgrade head
+
+      - name: Tests
+        # POSTGRES_DB is back to the suite's own database, which conftest
+        # creates and drops itself. Left unset here on purpose: conftest's
+        # default is surfacewatch_test, and pointing it at surfacewatch_ci
+        # would have the suite drop the database the migrations just built.
+        env:
+          POSTGRES_DB: surfacewatch_test
+        # --timeout fails a wedged test rather than letting the job's own limit
+        # kill the run and report nothing. -p no:randomly is not needed; there
+        # is no random-order plugin installed, and the suite is order-dependent
+        # in one place on purpose (test_migrations restores the schema).
+        run: pytest -q --timeout=120
+
+  frontend:
+    name: Frontend (typecheck, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci, not npm install: it installs exactly the lockfile and fails if
+      # package.json and the lock disagree, which is the check that catches a
+      # dependency added on someone's machine and never committed.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # A production build, not `npm run lint`. The Next build runs the
+      # type-checker and the ESLint config as part of compiling, and it is the
+      # step that would have caught the failures that actually reach users.
+      - name: Build
+        env:
+          # A production build inlines NEXT_PUBLIC_* into the bundle, and the
+          # value must be present or the build fails on an undefined URL. The
+          # value itself is irrelevant to whether the build succeeds.
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build

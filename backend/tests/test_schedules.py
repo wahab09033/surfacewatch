@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from models.base import ScanCadence, ScanStatus
+from models.base import ScanCadence
 from models.scan_schedule import initial_next_run, next_occurrence
 
 # No module-level asyncio mark: pytest.ini sets asyncio_mode = auto, and marking

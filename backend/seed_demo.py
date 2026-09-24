@@ -208,7 +208,7 @@ async def seed(reset: bool = False) -> int:
         await db.commit()
 
     print("\n  Demo organisation created.\n")
-    print(f"    URL:      http://localhost:3000/login")
+    print("    URL:      http://localhost:3000/login")
     print(f"    Email:    {EMAIL}")
     print(f"    Password: {PASSWORD}")
     print(f"\n    Also seeded: viewer@{DOMAIN} (same password, read-only role)")

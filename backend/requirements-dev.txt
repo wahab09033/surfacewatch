@@ -1,0 +1,27 @@
+# Test and development tooling. Installed by CI and by anyone working on this
+# codebase; deliberately not in requirements.txt, which is what the runtime
+# container installs.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Versions are pinned to match requirements.txt's convention. A floating test
+# dependency is a build that goes red on a Tuesday for a reason nobody changed.
+
+# --- Test runner -------------------------------------------------------
+pytest==9.1.1
+# asyncio_mode = auto in pytest.ini is what actually switches the async tests
+# on; without this plugin installed, every async def test is silently skipped
+# rather than failed, so the suite would report green having run almost nothing.
+pytest-asyncio==1.4.0
+# Fails a test that hangs instead of letting CI sit on it until the job's own
+# timeout kills the whole run and reports nothing useful. Several tests here
+# talk to Postgres and Redis; a wedged connection is the realistic failure.
+pytest-timeout==2.4.0
+
+# --- Test doubles ------------------------------------------------------
+# In-process Redis. The rate limiter and the scan event stream both write to
+# Redis, and neither needs a real server to be exercised.
+fakeredis==2.37.0
+
+# --- Lint --------------------------------------------------------------
+ruff==0.16.1

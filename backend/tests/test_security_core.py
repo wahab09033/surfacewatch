@@ -22,6 +22,7 @@ from core.scoring import (
     score_asset,
 )
 from core.security import (
+    InvalidTokenError,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -273,7 +274,7 @@ def test_refresh_token_cannot_be_used_as_access_token():
     refresh = create_refresh_token(
         user_id=uid, org_id=oid, role=UserRole.ANALYST, token_version=0
     )
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTokenError):
         decode_token(refresh, expect="access")
 
 
@@ -282,7 +283,7 @@ def test_access_token_cannot_be_used_as_refresh_token():
     access = create_access_token(
         user_id=uid, org_id=oid, role=UserRole.ANALYST, token_version=0
     )
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTokenError):
         decode_token(access, expect="refresh")
 
 
@@ -292,7 +293,7 @@ def test_tampered_token_is_rejected():
         user_id=uid, org_id=oid, role=UserRole.OWNER, token_version=0
     )
     tampered = token[:-4] + ("aaaa" if not token.endswith("aaaa") else "bbbb")
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTokenError):
         decode_token(tampered, expect="access")
 
 
@@ -311,7 +312,7 @@ def test_unsigned_token_is_rejected():
         + b64({"sub": str(uid), "org_id": str(oid), "role": "owner", "tv": 0, "type": "access"})
         + "."
     )
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTokenError):
         decode_token(forged, expect="access")
 
 
