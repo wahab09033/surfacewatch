@@ -8,8 +8,8 @@
  * has to stay readable, and neon red rows make that impossible.
  */
 
-import { ASSET_STATUS_LABEL, FINDING_STATUS_LABEL, SCAN_STATUS_LABEL, SEVERITY_LABEL, cn, riskBand } from "@/lib/format";
-import type { AssetStatus, FindingStatus, ScanStatus, Severity } from "@/lib/types";
+import { ASSET_STATUS_LABEL, DOMAIN_STATUS_LABEL, FINDING_STATUS_LABEL, SCAN_STATUS_LABEL, SEVERITY_LABEL, cn, riskBand } from "@/lib/format";
+import type { AssetStatus, DomainVerificationStatus, FindingStatus, ScanStatus, Severity } from "@/lib/types";
 
 const BASE =
   "inline-flex items-center gap-1.5 whitespace-nowrap rounded border px-1.5 py-0.5 text-2xs font-medium leading-4";
@@ -98,6 +98,30 @@ const ASSET_STATUS_TINT: Record<AssetStatus, string> = {
 
 export function AssetStatusBadge({ status, className }: { status: AssetStatus; className?: string }) {
   return <span className={cn(BASE, ASSET_STATUS_TINT[status], className)}>{ASSET_STATUS_LABEL[status]}</span>;
+}
+
+const DOMAIN_STATUS_TINT: Record<DomainVerificationStatus, string> = {
+  // Informational, not a warning: waiting on a DNS record the user has not
+  // published yet is the expected state, not a problem.
+  pending: "border-sev-info-bg bg-sev-info-bg text-sev-info-fg",
+  verified: "border-ok-bg bg-ok-bg text-ok-fg",
+  failed: "border-sev-critical-bg bg-sev-critical-bg text-sev-critical-fg",
+};
+
+/** Proof-of-ownership state for one domain claim. */
+export function DomainStatusBadge({
+  status,
+  className,
+}: {
+  status: DomainVerificationStatus;
+  className?: string;
+}) {
+  return (
+    <span className={cn(BASE, DOMAIN_STATUS_TINT[status], className)}>
+      <Dot />
+      {DOMAIN_STATUS_LABEL[status]}
+    </span>
+  );
 }
 
 /** Neutral pill for counts, module names, formats — anything without severity. */

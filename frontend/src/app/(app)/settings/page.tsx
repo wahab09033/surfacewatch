@@ -12,6 +12,7 @@
 import { useCallback, useState } from "react";
 
 import { PlusIcon, RefreshIcon, TrashIcon } from "@/components/app/icons";
+import { DomainsPanel } from "@/components/app/DomainsPanel";
 import { Chip } from "@/components/ui/Badge";
 import { Button, IconButton } from "@/components/ui/Button";
 import { DetailRow, PageHeader, Panel } from "@/components/ui/Card";
@@ -89,14 +90,16 @@ export default function SettingsPage() {
           )}
           {/*
             Scope is a safety control, not a preference: it is what stops a scan
-            being pointed at a host the org has no authorisation to touch. There
-            is no self-service endpoint to widen it, and that is the correct
-            default — say why rather than showing a disabled input.
+            being pointed at a host the org has no authorisation to touch. It is
+            self-service — the workflow lives in the Scanning scope panel below —
+            but the gate is a DNS record, not a form field, so this says what the
+            list on screen means and where it is changed.
           */}
           <p className="mt-3 border-t border-border pt-3 text-xs leading-relaxed text-muted">
-            Scans are refused against hosts outside these domains. Changing the verified list is a
-            server-side operation — it gates what you are authorised to scan, so it is deliberately
-            not editable from the console.
+            Scans are refused against hosts outside these domains, and every subdomain beneath a
+            verified domain is in scope too. The list is managed under{" "}
+            <span className="font-medium text-text">Scanning scope</span> below, where a domain is
+            granted only after you prove ownership by publishing a DNS record.
           </p>
         </Panel>
 
@@ -137,6 +140,13 @@ export default function SettingsPage() {
 
         <ApiKeysPanel />
       </div>
+
+      {/*
+        Full width, outside the two-column grid: the DNS records a claim has to
+        show are long monospace strings, and a half-width column breaks them
+        across three lines each.
+      */}
+      <DomainsPanel />
 
       <TeamPanel />
     </div>

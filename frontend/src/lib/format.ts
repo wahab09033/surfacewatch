@@ -1,6 +1,6 @@
 /** Small formatting and presentation helpers shared across pages. */
 
-import type { AssetStatus, FindingStatus, ScanStatus, Severity } from "./types";
+import type { AssetStatus, DomainVerificationStatus, FindingStatus, ScanStatus, Severity } from "./types";
 
 /** Conditional class names. Falsy entries drop out. */
 export function cn(...parts: (string | false | null | undefined)[]): string {
@@ -129,6 +129,19 @@ export const SCAN_STATUS_LABEL: Record<ScanStatus, string> = {
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
+};
+
+/**
+ * Domain-claim states.
+ *
+ * "Awaiting DNS" rather than "Pending", and "Check failed" rather than
+ * "Failed": both say what the state means for the reader. A failed claim is
+ * retryable with the same token, so the wording must not read as terminal.
+ */
+export const DOMAIN_STATUS_LABEL: Record<DomainVerificationStatus, string> = {
+  pending: "Awaiting DNS",
+  verified: "Verified",
+  failed: "Check failed",
 };
 
 /** Findings in these states still need attention. Mirrors the backend. */

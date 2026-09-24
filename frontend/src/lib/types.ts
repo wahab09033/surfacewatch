@@ -164,6 +164,55 @@ export interface InvitePayload {
   full_name?: string | null;
 }
 
+// --- domain verification (backend/schemas/domain.py) -----------------------
+
+export const DOMAIN_VERIFICATION_STATUSES = ["pending", "verified", "failed"] as const;
+export type DomainVerificationStatus = (typeof DOMAIN_VERIFICATION_STATUSES)[number];
+
+/**
+ * One organisation's claim on one domain.
+ *
+ * `failed` is not terminal and is not the same as `pending`: it records the
+ * outcome of the last check, so the UI can say whether the record was missing,
+ * wrong, or unreachable. Deleting and re-adding a claim to retry it would mint
+ * a new token and invalidate a record the user may have already published.
+ *
+ * The four `record_*` fields are derived server-side and suppressed once the
+ * claim is verified — the frontend never has to know the challenge format, and
+ * a token nobody needs to act on is not sent.
+ */
+export interface DomainClaim {
+  id: string;
+  domain: string;
+  status: DomainVerificationStatus;
+  verified_at: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  /** Where to publish the TXT record. */
+  record_name: string | null;
+  record_value: string | null;
+  /**
+   * The same challenge as a second record on the apex. Many DNS providers
+   * refuse a TXT at a `_subdomain` label, so both are offered.
+   */
+  apex_record_name: string | null;
+  apex_record_value: string | null;
+}
+
+export interface DomainClaimList {
+  items: DomainClaim[];
+  /** The per-organisation cap, so the UI can show "3 of 25" without hardcoding it. */
+  limit: number;
+}
+
+export interface DomainVerifyResult {
+  verified: boolean;
+  verification: DomainClaim;
+  /** Why the check failed — "no record", "wrong value" and "lookup failed" need different fixes. */
+  detail: string | null;
+}
+
 // --- assets ----------------------------------------------------------------
 
 export interface PortEntry {
@@ -447,6 +496,81 @@ export interface ScanStats {
   /** queued + running. */
   active: number;
   last_7d: number;
+}
+
+// --- schedules (backend/schemas/schedule.py) -------------------------------
+
+export const SCAN_CADENCES = ["hourly", "daily", "weekly"] as const;
+export type ScanCadence = (typeof SCAN_CADENCES)[number];
+
+export const CADENCE_LABEL: Record<ScanCadence, string> = {
+  hourly: "Hourly",
+  daily: "Daily",
+  weekly: "Weekly",
+};
+
+/** 0 = Monday, matching ScanSchedule.weekday and Python's date.weekday(). */
+export const WEEKDAY_NAMES = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+] as const;
+
+/** A recurring scan. Scans it produced are ordinary rows in `scans`. */
+export interface Schedule {
+  id: string;
+  org_id: string;
+  name: string;
+  target: string;
+  config: Partial<ScanConfig> & Record<string, unknown>;
+  cadence: ScanCadence;
+  /** 0-23, UTC. Hours are UTC because the scheduler is. */
+  hour_utc: number;
+  weekday: number | null;
+  is_enabled: boolean;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_scan_id: string | null;
+  consecutive_failures: number;
+  /**
+   * Set when the scheduler switched this off by itself. Shown verbatim: an
+   * autodisabled schedule with no explanation reads as a bug.
+   */
+  disabled_reason: string | null;
+  created_at: string;
+  /** Server-formatted cadence, e.g. "every Monday at 03:00 UTC". */
+  schedule_text: string | null;
+}
+
+export interface ScheduleCreate {
+  name: string;
+  target: string;
+  config?: Partial<ScanConfig>;
+  cadence: ScanCadence;
+  hour_utc: number;
+  weekday?: number | null;
+}
+
+/**
+ * The target is deliberately absent, mirroring ScheduleUpdate: repointing a
+ * recurring scan at a different host would carry on producing scans against an
+ * authorisation that was never checked for it.
+ */
+export interface ScheduleUpdate {
+  name?: string;
+  config?: Partial<ScanConfig>;
+  cadence?: ScanCadence;
+  hour_utc?: number;
+  weekday?: number | null;
+  is_enabled?: boolean;
+}
+
+export interface ScheduleList {
+  items: Schedule[];
 }
 
 // --- reports ---------------------------------------------------------------

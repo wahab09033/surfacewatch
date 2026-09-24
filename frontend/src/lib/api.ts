@@ -11,6 +11,9 @@ import type {
   AssetStats,
   AssetSummary,
   Dashboard,
+  DomainClaim,
+  DomainClaimList,
+  DomainVerifyResult,
   Finding,
   FindingQuery,
   FindingStats,
@@ -28,6 +31,10 @@ import type {
   ScanConfig,
   ScanLog,
   ScanStats,
+  Schedule,
+  ScheduleCreate,
+  ScheduleList,
+  ScheduleUpdate,
   TokenPair,
   User,
 } from "./types";
@@ -333,6 +340,46 @@ export const api = {
         method: "POST",
       });
     },
+
+    /**
+     * Domain claims — the scanning scope.
+     *
+     * Admin+ to write, analyst+ to read, enforced server-side. The list is not
+     * the same thing as `organisation.verified_domains`: that is the granted
+     * scope, this is every claim including the ones still waiting on DNS.
+     */
+    domains: {
+      list(signal?: AbortSignal) {
+        return request<DomainClaimList>("/api/auth/organisation/domains", { signal });
+      },
+      /**
+       * Claim a domain. Grants nothing until verified.
+       *
+       * Re-adding an existing domain returns the original claim and its
+       * original token rather than erroring — the common reason to re-add is
+       * having lost the token, and minting a new one would invalidate a TXT
+       * record that is already published.
+       */
+      add(domain: string) {
+        return request<DomainClaim>("/api/auth/organisation/domains", {
+          method: "POST",
+          body: { domain },
+        });
+      },
+      /** Query DNS and, if the record is there, grant scanning authority. */
+      verify(claimId: string) {
+        return request<DomainVerifyResult>(
+          `/api/auth/organisation/domains/${claimId}/verify`,
+          { method: "POST" },
+        );
+      },
+      /** Revokes scanning authority for that domain immediately. */
+      remove(claimId: string) {
+        return request<Message>(`/api/auth/organisation/domains/${claimId}`, {
+          method: "DELETE",
+        });
+      },
+    },
   },
 
   assets: {
@@ -415,6 +462,34 @@ export const api = {
     },
     remove(id: string) {
       return request<Message>(`/api/scans/${id}`, { method: "DELETE" });
+    },
+  },
+
+  schedules: {
+    list(signal?: AbortSignal) {
+      return request<ScheduleList>("/api/schedules", { signal });
+    },
+    get(id: string, signal?: AbortSignal) {
+      return request<Schedule>(`/api/schedules/${id}`, { signal });
+    },
+    create(payload: ScheduleCreate) {
+      return request<Schedule>("/api/schedules", { method: "POST", body: payload });
+    },
+    update(id: string, patch: ScheduleUpdate) {
+      return request<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: patch });
+    },
+    /**
+     * Queue one scan immediately without disturbing the cadence — "also run
+     * now", not "shift the schedule". `next_run_at` is untouched server-side.
+     *
+     * Analyst+, unlike the other writes here: it starts a scan rather than
+     * committing the organisation to a recurring one.
+     */
+    runNow(id: string) {
+      return request<Schedule>(`/api/schedules/${id}/run`, { method: "POST" });
+    },
+    remove(id: string) {
+      return request<Message>(`/api/schedules/${id}`, { method: "DELETE" });
     },
   },
 

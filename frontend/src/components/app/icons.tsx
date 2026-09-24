@@ -172,6 +172,25 @@ export function StopIcon() {
   );
 }
 
+/** Copy to clipboard — two offset sheets. */
+export function CopyIcon() {
+  return (
+    <svg {...props} width={12} height={12} viewBox="0 0 12 12">
+      <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" />
+      <path d="M4.5 10.5h4.5a1.5 1.5 0 0 0 1.5-1.5V4.5" />
+    </svg>
+  );
+}
+
+/** Confirmation that something landed. Pairs with CopyIcon. */
+export function CheckIcon() {
+  return (
+    <svg {...props} width={12} height={12} viewBox="0 0 12 12">
+      <path d="M2 6.2 4.8 9 10 3.2" />
+    </svg>
+  );
+}
+
 /**
  * Machine-written text. A four-point star, drawn on the same grid and stroke as
  * the rest of the set — deliberately not the usual gradient sparkle, which
