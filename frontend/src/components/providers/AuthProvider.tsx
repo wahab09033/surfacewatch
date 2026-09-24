@@ -113,9 +113,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(() => {
+    const refresh = tokens.refresh();
     tokens.clear();
     setUser(null);
     setOrganisation(null);
+    if (refresh) {
+      // Best-effort server-side revocation: a signed-out session's token must
+      // not be replayable. Failure just means the token lives until its exp.
+      api.auth.logout(refresh).catch(() => undefined);
+    }
     router.replace("/login");
   }, [router]);
 

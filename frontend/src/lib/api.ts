@@ -299,6 +299,19 @@ export const api = {
         body: { current_password, new_password },
       });
     },
+    /**
+     * Revoke a refresh session server-side. Called before the client clears
+     * its own copies, so a stolen token cannot be replayed after sign-out.
+     * Anonymous: the access token may already be dead, and the endpoint
+     * authenticates by the refresh token itself.
+     */
+    logout(refresh_token: string) {
+      return request<Message>("/api/auth/logout", {
+        method: "POST",
+        body: { refresh_token },
+        anonymous: true,
+      });
+    },
     users(signal?: AbortSignal) {
       return request<User[]>("/api/auth/users", { signal });
     },
