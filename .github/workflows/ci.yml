@@ -153,7 +153,7 @@ jobs:
         run: pytest -q --timeout=120
 
   frontend:
-    name: Frontend (typecheck, build)
+    name: Frontend (lint, typecheck, build)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -179,9 +179,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # A production build, not `npm run lint`. The Next build runs the
-      # type-checker and the ESLint config as part of compiling, and it is the
-      # step that would have caught the failures that actually reach users.
+      # Its own step because the build cannot cover it: next.config.js sets
+      # eslint.ignoreDuringBuilds, so `npm run build` prints "Skipping linting"
+      # and a lint error would land on main unnoticed. Checked against a clean
+      # tree before being added, so it is a gate and not an aspiration.
+      - name: Lint
+        run: npm run lint
+
+      # A production build, and the step that catches what actually reaches
+      # users — it type-checks and prerenders every route.
       - name: Build
         env:
           # A production build inlines NEXT_PUBLIC_* into the bundle, and the

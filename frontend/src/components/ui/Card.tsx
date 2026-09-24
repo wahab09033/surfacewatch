@@ -2,6 +2,8 @@
 
 /** Panels, cards, and page-level layout scaffolding. */
 
+import Link from "next/link";
+
 import { cn } from "@/lib/format";
 
 /** A bordered surface. The base container for everything on a page. */
@@ -114,10 +116,16 @@ export function StatCard({
   );
 
   if (href) {
+    // Link, not a bare <a>: every caller points this at an internal route
+    // (/assets, /findings, /scan), and an anchor makes each of those a full
+    // document load — the bundle reparsed, the providers remounted, client
+    // state thrown away. ESLint's no-html-link-for-pages exists to catch
+    // exactly this, but it only inspects literal hrefs and this one is a prop,
+    // so nothing flagged it.
     return (
-      <a href={href} className={shell}>
+      <Link href={href} className={shell}>
         {body}
-      </a>
+      </Link>
     );
   }
   if (onClick) {
