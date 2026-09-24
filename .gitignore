@@ -14,6 +14,11 @@
 .env.*
 !.env.example
 !**/.env.example
+# Any .env.<thing>.example template — .env.prod.example and future siblings.
+# The .env.* rule above would otherwise swallow them, and a deploy template
+# that is not tracked is a template nobody deploying from a clone can see.
+!.env.*.example
+!**/.env.*.example
 
 # --- Python -----------------------------------------------------------------
 .venv/
@@ -31,6 +36,10 @@ htmlcov/
 node_modules/
 .next/
 out/
+
+# Netlify CLI state. Holds the linked site id and a local build cache; the
+# linked-site record is per-developer, not per-repo.
+.netlify/
 tsconfig.tsbuildinfo
 .eslintcache
 npm-debug.log*

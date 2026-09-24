@@ -1,0 +1,268 @@
+# SurfaceWatch — production stack for a single VM.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# This is a STANDALONE file, deliberately not an override of docker-compose.yml.
+# Compose merges lists by appending, so layering the two would keep the dev
+# file's `./backend:/app` bind mounts and its published Postgres/Redis ports —
+# the two things that must not survive into production. Read this file and you
+# have read exactly what runs.
+#
+# Caddy terminates TLS and is the only container that publishes a port. The API,
+# the worker, Postgres and Redis are reachable only on the internal network.
+#
+# The frontend is assumed to be on Vercel. To run it here instead:
+#   docker compose -f docker-compose.prod.yml --profile with-frontend up -d
+
+name: surfacewatch
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-surfacewatch}
+  POSTGRES_USER: ${POSTGRES_USER:-surfacewatch}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — copy .env.prod.example to .env.prod}
+
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+  JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — generate a fresh one, do not reuse your local value}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-14}
+  BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+
+  # Your Vercel origin(s). The browser's Origin header is what is checked, so
+  # this is the frontend's public URL — never the API's own.
+  CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required — set it to your Vercel URL}
+
+  # Caddy sits in front and appends the real client IP to X-Forwarded-For, so
+  # the client is the 1st entry from the right. Leave this at 1 for this stack.
+  # Raising it lets anyone spoof their IP and bypass auth rate limiting.
+  TRUSTED_PROXY_COUNT: ${TRUSTED_PROXY_COUNT:-1}
+
+  ALLOW_ARBITRARY_TARGETS: ${ALLOW_ARBITRARY_TARGETS:-false}
+  # Lower than the dev defaults on purpose: a free-tier VM has one shared vCPU,
+  # and 200 concurrent sockets per host also looks far more like an attack to
+  # your cloud provider's abuse detection than a security scan needs to.
+  SCAN_MAX_CONCURRENCY: ${SCAN_MAX_CONCURRENCY:-50}
+  SCAN_CONNECT_TIMEOUT: ${SCAN_CONNECT_TIMEOUT:-3.0}
+  SCAN_RATE_LIMIT_PER_HOST: ${SCAN_RATE_LIMIT_PER_HOST:-20}
+
+  NVD_API_KEY: ${NVD_API_KEY:-}
+
+  AI_REMEDIATION_API_KEY: ${AI_REMEDIATION_API_KEY:-}
+  AI_REMEDIATION_ENABLED: ${AI_REMEDIATION_ENABLED:-true}
+  AI_REMEDIATION_MODEL: ${AI_REMEDIATION_MODEL:-claude-sonnet-5}
+  AI_REMEDIATION_MAX_PER_SCAN: ${AI_REMEDIATION_MAX_PER_SCAN:-60}
+  AI_REMEDIATION_TIMEOUT: ${AI_REMEDIATION_TIMEOUT:-45.0}
+  AI_REMEDIATION_CACHE_TTL_SECONDS: ${AI_REMEDIATION_CACHE_TTL_SECONDS:-604800}
+
+  SLACK_NOTIFICATIONS_ENABLED: ${SLACK_NOTIFICATIONS_ENABLED:-true}
+  SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-critical}
+  SLACK_TIMEOUT_SECONDS: ${SLACK_TIMEOUT_SECONDS:-10.0}
+
+  PASSWORD_HIBP_CHECK_ENABLED: ${PASSWORD_HIBP_CHECK_ENABLED:-false}
+
+  REPORT_OUTPUT_DIR: /var/lib/surfacewatch/reports
+
+x-backend-build: &backend-build
+  context: ./backend
+  target: prod
+
+services:
+  # --- edge -----------------------------------------------------------------
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is required — the hostname the API is served on}
+      APP_DOMAIN: ${APP_DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required — Let's Encrypt sends expiry warnings here}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy-data holds the issued certificates and the ACME account key. It
+      # MUST be a named volume: without it every restart re-requests a
+      # certificate, and Let's Encrypt allows only 5 per domain per week. Lose
+      # this and a few restarts lock you out of TLS for days.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # --- data stores ----------------------------------------------------------
+  #
+  # Neither publishes a port. They are reachable only from the compose network,
+  # which is the whole point: Redis has no password, and Docker's publish rules
+  # are inserted ahead of ufw/firewalld, so a published port would be open to
+  # the internet regardless of the host firewall.
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-surfacewatch}
+      POSTGRES_USER: ${POSTGRES_USER:-surfacewatch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-surfacewatch} -d ${POSTGRES_DB:-surfacewatch} -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # maxmemory guards the scan-log pub/sub on a small VM: without it a burst of
+    # log lines can grow the RSS until the OOM killer takes Postgres instead.
+    # allkeys-lru evicts old log entries; the Celery queues on /1 are what
+    # appendonly protects across a restart.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # --- schema ---------------------------------------------------------------
+
+  migrate:
+    build: *backend-build
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # --- application ----------------------------------------------------------
+
+  api:
+    build: *backend-build
+    # No --reload, and no bind mount: the code is the image. Deploying is
+    # `git pull && docker compose -f docker-compose.prod.yml up -d --build`.
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --proxy-headers
+      # Caddy is the only thing that can reach this port, so trusting its
+      # forwarded headers at the ASGI layer is safe here. Application-level IP
+      # extraction is governed separately by TRUSTED_PROXY_COUNT.
+      - --forwarded-allow-ips
+      - "*"
+      - --workers
+      - ${API_WORKERS:-2}
+    environment: *backend-env
+    volumes:
+      - reports:/var/lib/surfacewatch/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys\ntry:\n    sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3).status == 200 else 1)\nexcept Exception:\n    sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build: *backend-build
+    # -Q is not optional: celery_app.py routes every task to a named queue, and
+    # a worker without -Q listens only on the default "celery" queue. It would
+    # come up healthy, log nothing, and run no scans at all. Every queue in
+    # task_routes must appear here.
+    #
+    # No watchmedo in production — the code does not change under a running
+    # worker, and auto-restart mid-scan would abandon in-flight tasks.
+    command:
+      - celery
+      - -A
+      - workers.celery_app:celery_app
+      - worker
+      - --loglevel=${CELERY_LOG_LEVEL:-INFO}
+      - -Q
+      - scans,enrich,reports,notify
+      - --concurrency=${CELERY_CONCURRENCY:-2}
+      # Recycle a child after N tasks so a slow leak in a long-lived scan
+      # process cannot accumulate into an OOM on a 1 GB box.
+      - --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-50}
+    environment: *backend-env
+    volumes:
+      # Same named volume as the API. Two separate volumes would give every
+      # report download a 404 for a file that exists on the worker.
+      - reports:/var/lib/surfacewatch/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A workers.celery_app:celery_app inspect ping -d celery@$${HOSTNAME} >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+
+  # --- optional: frontend on this VM instead of Vercel -----------------------
+  #
+  #   docker compose -f docker-compose.prod.yml --profile with-frontend up -d
+  #
+  # Also uncomment the APP_DOMAIN block in the Caddyfile. NEXT_PUBLIC_API_URL is
+  # compiled into the JavaScript bundle at BUILD time, so changing it later
+  # requires --build, not just a restart.
+
+  frontend:
+    profiles: ["with-frontend"]
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        NEXT_PUBLIC_API_URL: https://${API_DOMAIN}
+    environment:
+      NEXT_PUBLIC_API_URL: https://${API_DOMAIN}
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+  reports:

@@ -1,0 +1,107 @@
+# SurfaceWatch — Netlify configuration (frontend only).
+#
+# This file lives at the REPOSITORY ROOT, not in frontend/. That is deliberate:
+# `base` below is what points Netlify at the frontend subdirectory, and Netlify
+# only reads that key from a root-level netlify.toml. Committing this file is
+# the entire project setup — there is nothing to configure in the dashboard
+# except the two environment variables noted at the bottom.
+#
+# The backend does NOT go here. Netlify runs no resident processes, so it cannot
+# host Celery workers, and a scan needs them. See docker-compose.prod.yml for
+# the backend, and the "Deploying for free" section of README.md for how the two
+# halves connect.
+
+[build]
+  # Everything below is resolved relative to this directory.
+  base = "frontend"
+
+  # next build with the Next Runtime writes here. Do not change it — the plugin
+  # discovers the build output at this path.
+  publish = ".next"
+
+  # typecheck first so a type error fails the deploy rather than shipping.
+  # next.config.js sets eslint.ignoreDuringBuilds, so lint never blocks a deploy;
+  # `tsc --noEmit` is what actually guards correctness here.
+  command = "npm run typecheck && npm run build"
+
+[build.environment]
+  # Netlify also honours frontend/.nvmrc, but that file is only consulted for
+  # some build images. Pinning it here is unambiguous. Unpinned, Netlify's
+  # default Node major moves and the build breaks on their schedule, not yours.
+  NODE_VERSION = "20"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+  # frontend/package-lock.json is committed, so Netlify installs with `npm ci`
+  # on its own — it installs exactly the lockfile and fails if the lockfile and
+  # package.json disagree, rather than silently resolving a different dependency
+  # tree in CI than the one you tested. These flags only trim the output.
+  NPM_FLAGS = "--no-audit --no-fund"
+
+[[plugins]]
+  # Netlify auto-installs this when it detects Next.js, but pinning it in the
+  # file means the build does not depend on that detection continuing to work.
+  package = "@netlify/plugin-nextjs"
+
+# --- Security headers ---------------------------------------------------------
+#
+# These duplicate what backend/core/security_headers.py sets, and they have to:
+# Netlify serves the frontend, so FastAPI never sees these requests and its
+# middleware cannot set headers on them.
+#
+# No Content-Security-Policy here on purpose. A correct connect-src has to name
+# the API host and its wss:// origin, which differ per deployment, and a CSP that
+# is subtly wrong silently breaks every fetch and the scan WebSocket. Add one
+# once your API hostname is fixed — see the commented example below.
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "geolocation=(), microphone=(), camera=(), payment=()"
+    # Netlify terminates TLS for every deploy, so HSTS is safe to assert. It
+    # applies to the Netlify hostname and any custom domain you attach.
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+    # Cross-Origin-Opener-Policy isolates this page's browsing context. Safe
+    # here because nothing in the app opens a popup it then talks to.
+    Cross-Origin-Opener-Policy = "same-origin"
+
+    # Once API_DOMAIN is settled, replace api.example.com below and uncomment.
+    # connect-src must list BOTH https:// and wss:// — the dashboard fetches over
+    # https and /ws/scan/{id} opens a WebSocket, and wss:// is not covered by the
+    # https:// entry. 'unsafe-inline' in style-src is required by Next's injected
+    # critical CSS; without it the app renders unstyled.
+    #
+    # Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.example.com wss://api.example.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+# Next fingerprints these filenames by content hash, so they are safe to cache
+# permanently. Without this they are revalidated on every navigation, which on a
+# metered free tier is bandwidth spent re-confirming files that cannot change.
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# --- Environment variables (set these in the Netlify UI) ----------------------
+#
+# Site configuration → Environment variables:
+#
+#   NEXT_PUBLIC_API_URL = https://<your-api-domain>
+#
+# Required. It is compiled into the browser bundle at BUILD time, so changing it
+# needs a redeploy, not just a restart. Leave it unset and src/lib/api.ts falls
+# back to http://localhost:8000 — meaning every visitor's browser tries to reach
+# a backend on their OWN machine. The site loads and then fails every request,
+# login included. Nothing in the UI hints at the cause.
+#
+# It must be https://. An https:// page cannot call http:// or open ws:// — the
+# browser blocks it as mixed content before the request is sent.
+#
+# Then on the BACKEND, add this site's origin to CORS_ORIGINS:
+#
+#   CORS_ORIGINS=https://<your-site>.netlify.app
+#
+# Netlify gives every branch and pull-request deploy its own origin
+# (deploy-preview-42--your-site.netlify.app). Those are NOT covered by the
+# production origin, so previews fail CORS until you add them too.

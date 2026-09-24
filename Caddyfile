@@ -1,0 +1,66 @@
+# SurfaceWatch — TLS edge.
+#
+# Caddy requests and renews Let's Encrypt certificates automatically. There is
+# nothing to run and no cron job: it needs port 80 and 443 reachable from the
+# internet and a domain whose A record points at this VM. That is the whole
+# setup, and it is what makes the Vercel frontend able to talk to this API at
+# all — an https:// page cannot call http://, so without TLS here the browser
+# blocks every request as mixed content.
+#
+# Domains come from the environment (see .env.prod.example).
+
+{
+	email {$ACME_EMAIL}
+
+	# Uncomment to use the staging CA while you are getting DNS right. Its certs
+	# are untrusted by browsers, but its rate limits are far looser than the 5
+	# certificates per domain per week on production — which is easy to burn
+	# through with a typo'd A record.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# --- API ---------------------------------------------------------------------
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# WebSockets need no special handling in Caddy 2. reverse_proxy detects the
+	# upgrade, hijacks the connection and streams it bidirectionally with no
+	# timeout, which is exactly what /ws/scan/{id} wants — scan output streams
+	# for minutes. Nothing here needs tuning for that, and every directive left
+	# out is one that cannot be misconfigured into cutting a scan off mid-run.
+	#
+	# X-Forwarded-For is appended to by default, so the real client IP is the
+	# last entry. That pairs with TRUSTED_PROXY_COUNT=1 on the API; the two must
+	# agree or auth rate limiting keys on the wrong address.
+	reverse_proxy api:8000
+
+	# HSTS is set by the API's own middleware in production, so it is not
+	# duplicated here. Duplicate headers are a real risk: two
+	# Strict-Transport-Security values is undefined behaviour across browsers.
+
+	log {
+		output file /data/access-api.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}
+
+# --- Frontend (only if you are NOT using Vercel) ------------------------------
+#
+# Uncomment this block and set APP_DOMAIN when running with
+# `--profile with-frontend`. Leave it commented for a Vercel frontend: Caddy
+# fails to start if APP_DOMAIN is empty, taking the API down with it.
+#
+# {$APP_DOMAIN} {
+# 	encode zstd gzip
+# 	reverse_proxy frontend:3000
+#
+# 	log {
+# 		output file /data/access-app.log {
+# 			roll_size 10mb
+# 			roll_keep 5
+# 		}
+# 	}
+# }
