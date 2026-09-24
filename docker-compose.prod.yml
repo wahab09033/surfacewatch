@@ -69,6 +69,77 @@ x-backend-env: &backend-env
 
   REPORT_OUTPUT_DIR: /var/lib/surfacewatch/reports
 
+  # --- Everything below is a setting that exists in config.py ----------------
+  #
+  # Passed through rather than left to the code defaults: a setting documented
+  # in .env.prod.example that the container never reads is worse than one that
+  # does not exist, because it looks like it worked. Each default here mirrors
+  # config.py, and backend/tests/test_compose_config.py fails if the two drift
+  # apart — so changing a default in one place cannot leave the other stale.
+  #
+  # Sizing note for the DB_* entries: the API runs API_WORKERS processes, each
+  # with its own pool, so the fleet's ceiling is
+  # API_WORKERS x (DB_POOL_SIZE + DB_MAX_OVERFLOW) plus the workers'. A
+  # free-tier managed Postgres often allows only 20-25 connections in total,
+  # and exceeding it shows up as "FATAL: sorry, too many clients already" under
+  # load rather than as a slow response. With the defaults below: 2 x 6 + 3 = 15.
+
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-4}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-2}
+  DB_WORKER_POOL_SIZE: ${DB_WORKER_POOL_SIZE:-2}
+  DB_WORKER_MAX_OVERFLOW: ${DB_WORKER_MAX_OVERFLOW:-1}
+  # Below the idle timeout of every managed Postgres and of the poolers in
+  # front of them (pgbouncer, RDS Proxy, Neon, Supabase), so the pool closes a
+  # connection before the server does and never hands out a dead one.
+  DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
+  DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30.0}
+  DB_ECHO: ${DB_ECHO:-false}
+
+  # HS256 is what core.security signs with. Changing it invalidates every
+  # issued token; it is here so the value shows up in `docker compose config`.
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+
+  RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-900}
+  RATE_LIMIT_LOGIN_PER_IP: ${RATE_LIMIT_LOGIN_PER_IP:-30}
+  RATE_LIMIT_LOGIN_FAILURES_PER_ACCOUNT: ${RATE_LIMIT_LOGIN_FAILURES_PER_ACCOUNT:-10}
+  RATE_LIMIT_REGISTER_PER_IP: ${RATE_LIMIT_REGISTER_PER_IP:-5}
+  RATE_LIMIT_REFRESH_PER_IP: ${RATE_LIMIT_REFRESH_PER_IP:-60}
+  RATE_LIMIT_DOMAIN_VERIFY_PER_ORG: ${RATE_LIMIT_DOMAIN_VERIFY_PER_ORG:-20}
+
+  PASSWORD_HIBP_TIMEOUT: ${PASSWORD_HIBP_TIMEOUT:-3.0}
+  PASSWORD_HIBP_MAX_APPEARANCES: ${PASSWORD_HIBP_MAX_APPEARANCES:-1}
+
+  # Emitted only when ENVIRONMENT=production, which this file sets.
+  HSTS_MAX_AGE: ${HSTS_MAX_AGE:-31536000}
+
+  # The scanner identifies itself with this. A contact URL that actually
+  # resolves is what an abuse desk looks for before blocking the source
+  # address, so it is worth setting to something real.
+  HTTP_USER_AGENT: "${HTTP_USER_AGENT:-SurfaceWatch/1.0 (+https://surfacewatch.local/scanner)}"
+
+  # Ceilings on what one tenant can occupy, which matter more here than in
+  # development because a public deployment means tenants you have never met.
+  MAX_CONCURRENT_SCANS_PER_ORG: ${MAX_CONCURRENT_SCANS_PER_ORG:-5}
+  MAX_VERIFIED_DOMAINS_PER_ORG: ${MAX_VERIFIED_DOMAINS_PER_ORG:-25}
+
+  SCHEDULE_MAX_CONSECUTIVE_FAILURES: ${SCHEDULE_MAX_CONSECUTIVE_FAILURES:-5}
+  DOMAIN_REVERIFY_ENABLED: ${DOMAIN_REVERIFY_ENABLED:-true}
+  DOMAIN_REVERIFY_FAILURE_THRESHOLD: ${DOMAIN_REVERIFY_FAILURE_THRESHOLD:-0}
+
+  RETENTION_SCAN_LOG_DAYS: ${RETENTION_SCAN_LOG_DAYS:-30}
+  RETENTION_SCAN_DAYS: ${RETENTION_SCAN_DAYS:-0}
+  RETENTION_REPORT_DAYS: ${RETENTION_REPORT_DAYS:-0}
+
+  NVD_API_BASE: "${NVD_API_BASE:-https://services.nvd.nist.gov/rest/json/cves/2.0}"
+  NVD_CACHE_TTL_SECONDS: ${NVD_CACHE_TTL_SECONDS:-86400}
+
+  AI_REMEDIATION_MAX_TOKENS: ${AI_REMEDIATION_MAX_TOKENS:-1200}
+
+  # Presentation only.
+  API_TITLE: ${API_TITLE:-SurfaceWatch API}
+  API_VERSION: ${API_VERSION:-1.0.0}
+
 x-backend-build: &backend-build
   context: ./backend
   target: prod
